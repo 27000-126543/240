@@ -1,9 +1,6 @@
 import { Server } from 'socket.io';
 import { v4 as uuidv4 } from 'uuid';
-import { AppDataSource } from '../data-source';
-import { Task } from '../entities/Task';
-import { Batch } from '../entities/Batch';
-import { Warning } from '../entities/Warning';
+import { db } from '../db/database';
 import { TaskStatus, ProcessParams, SimulationResult, RealtimeMetrics } from '../types';
 
 const STATUS_FLOW: TaskStatus[] = [
@@ -25,9 +22,6 @@ const STATUS_DURATIONS = {
 class SimulationEngine {
   private io: Server | null = null;
   private runningTasks: Map<string, NodeJS.Timeout[]> = new Map();
-  private taskRepository = AppDataSource.getRepository(Task);
-  private batchRepository = AppDataSource.getRepository(Batch);
-  private warningRepository = AppDataSource.getRepository(Warning);
 
   initialize(io: Server) {
     this.io = io;
@@ -35,28 +29,29 @@ class SimulationEngine {
   }
 
   async startTask(taskId: string) {
-    const task = await this.taskRepository.findOne({ where: { id: taskId } });
+    const task = db.findOne('tasks', (t) => t.id === taskId);
     if (!task) {
       throw new Error('Task not found');
     }
 
-    const batch = await this.batchRepository.findOne({ where: { id: task.batchId } });
+    const batch = db.findOne('batches', (b) => b.id === task.batchId);
     if (batch && batch.status === 'paused') {
       throw new Error('Batch is paused, cannot start task');
     }
 
-    task.status = 'model_building';
-    task.startedAt = new Date();
-    task.progress = 5;
-    task.realtimeMetrics = [];
-    await this.taskRepository.save(task);
+    const updatedTask = db.update('tasks', (t) => t.id === taskId, {
+      status: 'model_building',
+      startedAt: new Date(),
+      progress: 5,
+      realtimeMetrics: []
+    });
 
-    this.notifyTaskUpdate(task);
+    this.notifyTaskUpdate(updatedTask!);
     this.processNextStatus(taskId);
   }
 
   private async processNextStatus(taskId: string) {
-    const task = await this.taskRepository.findOne({ where: { id: taskId } });
+    const task = db.findOne('tasks', (t) => t.id === taskId);
     if (!task || task.status === 'completed' || task.status === 'error') {
       return;
     }
@@ -80,21 +75,30 @@ class SimulationEngine {
       step++;
       const progress = Math.min(95, baseProgress + (progressRange * step / progressSteps));
       
-      const metrics = this.generateRealtimeMetrics(task, progress, nextStatus);
-      
-      task.progress = progress;
-      if (task.realtimeMetrics) {
-        task.realtimeMetrics.push(metrics);
-        if (task.realtimeMetrics.length > 100) {
-          task.realtimeMetrics = task.realtimeMetrics.slice(-100);
-        }
+      const currentTask = db.findOne('tasks', (t) => t.id === taskId);
+      if (!currentTask) {
+        clearInterval(intervalId);
+        return;
       }
       
-      await this.taskRepository.save(task);
-      this.notifyTaskUpdate(task);
-      this.notifyMetrics(task.id, metrics);
-
-      await this.checkWarnings(task, metrics);
+      const metrics = this.generateRealtimeMetrics(currentTask, progress, nextStatus);
+      
+      const updatedRealtimeMetrics = currentTask.realtimeMetrics ? [...currentTask.realtimeMetrics] : [];
+      updatedRealtimeMetrics.push(metrics);
+      if (updatedRealtimeMetrics.length > 100) {
+        updatedRealtimeMetrics.splice(0, updatedRealtimeMetrics.length - 100);
+      }
+      
+      const updatedTask = db.update('tasks', (t) => t.id === taskId, {
+        progress,
+        realtimeMetrics: updatedRealtimeMetrics
+      });
+      
+      if (updatedTask) {
+        this.notifyTaskUpdate(updatedTask);
+        this.notifyMetrics(taskId, metrics);
+        await this.checkWarnings(updatedTask, metrics);
+      }
 
       if (step >= progressSteps) {
         clearInterval(intervalId);
@@ -106,29 +110,34 @@ class SimulationEngine {
   }
 
   private async advanceStatus(taskId: string, nextStatus: TaskStatus) {
-    const task = await this.taskRepository.findOne({ where: { id: taskId } });
+    const task = db.findOne('tasks', (t) => t.id === taskId);
     if (!task) return;
 
-    task.status = nextStatus;
+    const updates: any = { status: nextStatus };
 
     if (nextStatus === 'completed') {
-      task.progress = 100;
-      task.completedAt = new Date();
-      task.result = this.generateSimulationResult(task.parameters);
-      
-      await this.updateBatchAfterTaskCompletion(task);
-      await this.checkBatchNonuniformity(task.batchId);
+      updates.progress = 100;
+      updates.completedAt = new Date();
+      updates.result = this.generateSimulationResult(task.parameters);
     }
 
-    await this.taskRepository.save(task);
-    this.notifyTaskUpdate(task);
+    const updatedTask = db.update('tasks', (t) => t.id === taskId, updates);
+    
+    if (updatedTask) {
+      this.notifyTaskUpdate(updatedTask);
+
+      if (nextStatus === 'completed') {
+        await this.updateBatchAfterTaskCompletion(updatedTask);
+        await this.checkBatchNonuniformity(updatedTask.batchId);
+      }
+    }
 
     if (nextStatus !== 'completed') {
       setTimeout(() => this.processNextStatus(taskId), 500);
     }
   }
 
-  private generateRealtimeMetrics(task: Task, progress: number, status: TaskStatus): RealtimeMetrics {
+  private generateRealtimeMetrics(task: any, progress: number, status: TaskStatus): RealtimeMetrics {
     const params = task.parameters;
     
     const baseAngle = 88 + (params.rf_power / 1000) * 2 - (params.pressure / 100) * 1;
@@ -195,7 +204,7 @@ class SimulationEngine {
     };
   }
 
-  private async checkWarnings(task: Task, metrics: RealtimeMetrics) {
+  private async checkWarnings(task: any, metrics: RealtimeMetrics) {
     const warnings = [];
 
     const targetAngle = 90;
@@ -219,43 +228,39 @@ class SimulationEngine {
     }
 
     for (const w of warnings) {
-      const existingWarning = await this.warningRepository.findOne({
-        where: {
-          taskId: task.id,
-          type: w.type,
-          acknowledged: false
-        }
-      });
+      const existingWarning = db.findOne('warnings', (warn: any) => 
+        warn.taskId === task.id && warn.type === w.type && !warn.acknowledged
+      );
 
       if (!existingWarning) {
-        const warning = this.warningRepository.create({
+        const warning = db.create('warnings', {
           id: uuidv4(),
           taskId: task.id,
+          acknowledged: false,
+          createdAt: new Date(),
           ...w
         });
-        await this.warningRepository.save(warning);
         this.notifyWarning(warning);
       }
     }
   }
 
-  private async updateBatchAfterTaskCompletion(task: Task) {
-    const batch = await this.batchRepository.findOne({ where: { id: task.batchId } });
+  private async updateBatchAfterTaskCompletion(task: any) {
+    const batch = db.findOne('batches', (b: any) => b.id === task.batchId);
     if (batch) {
-      batch.completedCount = (batch.completedCount || 0) + 1;
-      await this.batchRepository.save(batch);
+      db.update('batches', (b: any) => b.id === task.batchId, {
+        completedCount: (batch.completedCount || 0) + 1
+      });
     }
   }
 
   private async checkBatchNonuniformity(batchId: string) {
-    const batch = await this.batchRepository.findOne({ 
-      where: { id: batchId },
-      relations: ['tasks']
-    });
+    const batch = db.findOne('batches', (b: any) => b.id === batchId);
     
     if (!batch) return;
 
-    const completedTasks = batch.tasks.filter(t => t.status === 'completed' && t.result);
+    const tasks = db.find('tasks', (t: any) => t.batchId === batchId);
+    const completedTasks = tasks.filter(t => t.status === 'completed' && t.result);
     if (completedTasks.length < 3) return;
 
     const recentTasks = completedTasks.slice(-3);
@@ -264,39 +269,44 @@ class SimulationEngine {
       return t.result.uniformity < 95;
     }).length;
 
-    batch.nonuniformCount = nonuniformCount;
+    const updates: any = { nonuniformCount };
 
     if (nonuniformCount >= 3) {
-      batch.status = 'paused';
-      batch.pauseReason = '连续三次模拟刻蚀不均匀度超过5%';
-      this.notifyBatchPaused(batch);
+      updates.status = 'paused';
+      updates.pauseReason = '连续三次模拟刻蚀不均匀度超过5%';
     }
 
-    await this.batchRepository.save(batch);
+    const updatedBatch = db.update('batches', (b: any) => b.id === batchId, updates);
+    
+    if (updatedBatch && nonuniformCount >= 3) {
+      this.notifyBatchPaused(updatedBatch);
+    }
   }
 
   async adjustParameters(taskId: string, newParams: Partial<ProcessParams>, reason: string, adjustedBy: string) {
-    const task = await this.taskRepository.findOne({ where: { id: taskId } });
+    const task = db.findOne('tasks', (t: any) => t.id === taskId);
     if (!task) throw new Error('Task not found');
 
     this.stopTask(taskId);
 
-    const beforeParams = { ...task.parameters };
-    task.parameters = { ...task.parameters, ...newParams };
-    task.adjustCount = (task.adjustCount || 0) + 1;
-    task.status = 'model_building';
-    task.progress = 5;
-    task.realtimeMetrics = [];
-    task.result = undefined;
-    task.startedAt = new Date();
-    task.completedAt = undefined;
+    const updatedTask = db.update('tasks', (t: any) => t.id === taskId, {
+      parameters: { ...task.parameters, ...newParams },
+      adjustCount: (task.adjustCount || 0) + 1,
+      status: 'model_building',
+      progress: 5,
+      realtimeMetrics: [],
+      result: undefined,
+      startedAt: new Date(),
+      completedAt: undefined
+    });
 
-    await this.taskRepository.save(task);
-    this.notifyTaskUpdate(task);
+    if (updatedTask) {
+      this.notifyTaskUpdate(updatedTask);
+    }
 
     setTimeout(() => this.processNextStatus(taskId), 500);
 
-    return task;
+    return updatedTask;
   }
 
   stopTask(taskId: string) {
@@ -313,7 +323,7 @@ class SimulationEngine {
     this.runningTasks.set(taskId, timeouts);
   }
 
-  private notifyTaskUpdate(task: Task) {
+  private notifyTaskUpdate(task: any) {
     if (this.io) {
       this.io.emit('task:update', {
         taskId: task.id,
@@ -329,13 +339,13 @@ class SimulationEngine {
     }
   }
 
-  private notifyWarning(warning: Warning) {
+  private notifyWarning(warning: any) {
     if (this.io) {
       this.io.emit('warning:new', warning);
     }
   }
 
-  private notifyBatchPaused(batch: Batch) {
+  private notifyBatchPaused(batch: any) {
     if (this.io) {
       this.io.emit('batch:paused', batch);
     }

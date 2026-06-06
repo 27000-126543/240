@@ -1,8 +1,7 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { 
   Upload, 
-  FileUp, 
   Zap, 
   Gauge, 
   Thermometer, 
@@ -11,16 +10,16 @@ import {
   Play,
   Eye,
   CheckCircle2,
-  Layers
+  Loader2
 } from 'lucide-react';
 import { useTaskStore } from '@/store/useTaskStore';
 
 export default function CreateTask() {
   const navigate = useNavigate();
-  const { addTask, batches } = useTaskStore();
+  const { createTask, uploadMask, batches, fetchBatches } = useTaskStore();
   const [step, setStep] = useState(1);
   const [taskName, setTaskName] = useState('');
-  const [selectedBatch, setSelectedBatch] = useState(batches[0]?.id || '');
+  const [selectedBatch, setSelectedBatch] = useState('');
   const [maskFile, setMaskFile] = useState<File | null>(null);
   const [params, setParams] = useState({
     rf_power: 600,
@@ -30,6 +29,17 @@ export default function CreateTask() {
     temperature: 60,
     time: 180,
   });
+  const [submitting, setSubmitting] = useState(false);
+
+  useEffect(() => {
+    fetchBatches();
+  }, [fetchBatches]);
+
+  useEffect(() => {
+    if (batches.length > 0 && !selectedBatch) {
+      setSelectedBatch(batches[0].id);
+    }
+  }, [batches, selectedBatch]);
 
   const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
     if (e.target.files?.[0]) {
@@ -37,19 +47,25 @@ export default function CreateTask() {
     }
   };
 
-  const handleSubmit = () => {
-    if (!taskName || !maskFile) return;
+  const handleSubmit = async () => {
+    if (!taskName || !maskFile || !selectedBatch) return;
     
-    addTask({
-      batchId: selectedBatch,
-      name: taskName,
-      maskFile: maskFile.name,
-      status: 'pending',
-      progress: 0,
-      parameters: params,
-    });
-    
-    navigate('/tasks');
+    try {
+      setSubmitting(true);
+      const newTask = await createTask({
+        name: taskName,
+        batchId: selectedBatch,
+        parameters: params,
+      });
+      
+      await uploadMask(newTask.id, maskFile);
+      
+      navigate('/tasks');
+    } catch (error) {
+      console.error('Failed to create task:', error);
+    } finally {
+      setSubmitting(false);
+    }
   };
 
   const steps = [
@@ -336,11 +352,15 @@ export default function CreateTask() {
         ) : (
           <button
             onClick={handleSubmit}
-            disabled={!taskName || !maskFile}
+            disabled={!taskName || !maskFile || submitting}
             className="h-10 px-6 rounded-lg bg-gradient-to-r from-green-500 to-emerald-500 text-white text-sm font-medium flex items-center gap-2 hover:shadow-glow disabled:opacity-50 disabled:cursor-not-allowed transition-all"
           >
-            <Play className="w-4 h-4" />
-            提交任务
+            {submitting ? (
+              <Loader2 className="w-4 h-4 animate-spin" />
+            ) : (
+              <Play className="w-4 h-4" />
+            )}
+            {submitting ? '提交中...' : '提交任务'}
           </button>
         )}
       </div>

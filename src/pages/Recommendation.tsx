@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { 
   Lightbulb, 
   Zap, 
@@ -10,32 +10,71 @@ import {
   TrendingUp,
   Target,
   Play,
-  CheckCircle2
+  CheckCircle2,
+  Loader2
 } from 'lucide-react';
-import { mockRecommendations } from '@/data/mockData';
+import { api } from '@/services/api';
 import { useTaskStore } from '@/store/useTaskStore';
 import { useNavigate } from 'react-router-dom';
+import type { Recommendation } from '@/types';
 
 export default function Recommendation() {
-  const { addTask, batches } = useTaskStore();
+  const { batches, fetchBatches } = useTaskStore();
   const navigate = useNavigate();
+  const [recommendations, setRecommendations] = useState<Recommendation[]>([]);
+  const [loading, setLoading] = useState(false);
   const [selectedRec, setSelectedRec] = useState<string | null>(null);
+  const [applyingId, setApplyingId] = useState<string | null>(null);
 
-  const applyRecommendation = (recId: string) => {
-    const rec = mockRecommendations.find(r => r.id === recId);
-    if (!rec) return;
-    
-    addTask({
-      batchId: batches[0].id,
-      name: `推荐方案 - ${rec.name}`,
-      maskFile: 'auto_mask.gds',
-      status: 'pending',
-      progress: 0,
-      parameters: rec.parameters,
-    });
-    
-    navigate('/tasks');
+  const fetchRecommendations = async () => {
+    setLoading(true);
+    try {
+      const data = await api.recommendations.list() as any;
+      const recList = Array.isArray(data) ? data : data.recommendations || [];
+      setRecommendations(recList);
+    } catch (error) {
+      console.error('Failed to fetch recommendations:', error);
+    } finally {
+      setLoading(false);
+    }
   };
+
+  useEffect(() => {
+    fetchRecommendations();
+    fetchBatches();
+  }, [fetchBatches]);
+
+  const applyRecommendation = async (recId: string) => {
+    const rec = recommendations.find(r => r.id === recId);
+    if (!rec || batches.length === 0) return;
+    
+    try {
+      setApplyingId(recId);
+      await api.recommendations.apply(recId);
+      
+      navigate('/tasks');
+    } catch (error) {
+      console.error('Failed to apply recommendation:', error);
+    } finally {
+      setApplyingId(null);
+    }
+  };
+
+  const stats = {
+    total: recommendations.length,
+    usage: 85,
+    accuracy: 92.3,
+    efficiency: 6.8,
+  };
+
+  if (loading && recommendations.length === 0) {
+    return (
+      <div className="flex flex-col items-center justify-center h-96">
+        <Loader2 className="w-12 h-12 text-tech-400 animate-spin mb-4" />
+        <p className="text-gray-400">加载中...</p>
+      </div>
+    );
+  }
 
   return (
     <div className="space-y-6">
@@ -52,26 +91,26 @@ export default function Recommendation() {
 
         <div className="grid grid-cols-4 gap-4">
           <div className="text-center p-4 rounded-xl bg-deep-800/50 border border-tech-500/20">
-            <p className="text-3xl font-display font-bold text-tech-300">{mockRecommendations.length}</p>
+            <p className="text-3xl font-display font-bold text-tech-300">{stats.total}</p>
             <p className="text-xs text-gray-400 mt-1">可用方案</p>
           </div>
           <div className="text-center p-4 rounded-xl bg-deep-800/50 border border-green-500/20">
-            <p className="text-3xl font-display font-bold text-green-400">85</p>
+            <p className="text-3xl font-display font-bold text-green-400">{stats.usage}</p>
             <p className="text-xs text-gray-400 mt-1">历史调用次数</p>
           </div>
           <div className="text-center p-4 rounded-xl bg-deep-800/50 border border-cyan-500/20">
-            <p className="text-3xl font-display font-bold text-cyan-400">92.3%</p>
+            <p className="text-3xl font-display font-bold text-cyan-400">{stats.accuracy}%</p>
             <p className="text-xs text-gray-400 mt-1">推荐准确率</p>
           </div>
           <div className="text-center p-4 rounded-xl bg-deep-800/50 border border-plasma-purple/20">
-            <p className="text-3xl font-display font-bold text-plasma-purple">6.8x</p>
+            <p className="text-3xl font-display font-bold text-plasma-purple">{stats.efficiency}x</p>
             <p className="text-xs text-gray-400 mt-1">效率提升</p>
           </div>
         </div>
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-        {mockRecommendations.map(rec => (
+        {recommendations.map(rec => (
           <div
             key={rec.id}
             onClick={() => setSelectedRec(selectedRec === rec.id ? null : rec.id)}
@@ -155,10 +194,15 @@ export default function Recommendation() {
               </div>
               <button
                 onClick={(e) => { e.stopPropagation(); applyRecommendation(rec.id); }}
-                className="ml-auto h-9 px-4 rounded-lg bg-gradient-to-r from-tech-500 to-cyan-500 text-white text-sm font-medium flex items-center gap-1.5 hover:shadow-glow transition-all"
+                disabled={applyingId === rec.id || batches.length === 0}
+                className="ml-auto h-9 px-4 rounded-lg bg-gradient-to-r from-tech-500 to-cyan-500 text-white text-sm font-medium flex items-center gap-1.5 hover:shadow-glow transition-all disabled:opacity-50 disabled:cursor-not-allowed"
               >
-                <Play className="w-3.5 h-3.5" />
-                应用方案
+                {applyingId === rec.id ? (
+                  <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                ) : (
+                  <Play className="w-3.5 h-3.5" />
+                )}
+                {applyingId === rec.id ? '应用中...' : '应用方案'}
               </button>
             </div>
 

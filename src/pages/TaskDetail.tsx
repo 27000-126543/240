@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { 
   ArrowLeft, 
@@ -12,10 +12,9 @@ import {
   Zap,
   Gauge,
   Thermometer,
-  Wind,
-  FileText,
   History,
-  UserCheck
+  UserCheck,
+  Loader2
 } from 'lucide-react';
 import {
   LineChart,
@@ -25,7 +24,6 @@ import {
   CartesianGrid,
   Tooltip,
   ResponsiveContainer,
-  Legend,
   Area,
   AreaChart,
   BarChart,
@@ -34,37 +32,66 @@ import {
 import { StatusBadge } from '@/components/ui/StatusBadge';
 import { ProgressBar } from '@/components/ui/ProgressBar';
 import { useTaskStore } from '@/store/useTaskStore';
-import type { Task, TaskStatus } from '@/types';
+import { socketService } from '@/services/socket';
+import type { TaskStatus } from '@/types';
 
 const statusFlow: TaskStatus[] = ['pending', 'model_building', 'plasma_calculation', 'rate_analysis', 'profile_evolution', 'completed'];
 
 export default function TaskDetail() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
-  const { getTaskById, updateTaskStatus, updateTaskProgress } = useTaskStore();
+  const { getTaskById, fetchTask, updateTaskStatus, updateTaskProgress, startTask, loading, error } = useTaskStore();
   const [activeTab, setActiveTab] = useState<'overview' | 'monitoring' | 'parameters' | 'history'>('overview');
   const [isSimulating, setIsSimulating] = useState(false);
   
   const task = getTaskById(id || '');
   
-  useEffect(() => {
-    if (isSimulating && task && !['completed', 'error'].includes(task.status)) {
-      const currentIdx = statusFlow.indexOf(task.status);
-      const nextIdx = Math.min(currentIdx + 1, statusFlow.length - 1);
-      
-      const timer = setInterval(() => {
-        if (task.progress < 100) {
-          updateTaskProgress(task.id, Math.min(100, task.progress + 2));
-        }
-        if (task.progress >= 95 && nextIdx < statusFlow.length) {
-          updateTaskStatus(task.id, statusFlow[nextIdx]);
-          setIsSimulating(false);
-        }
-      }, 500);
-      
-      return () => clearInterval(timer);
+  const handleTaskUpdate = useCallback((data: { taskId: string; status: string; progress: number }) => {
+    if (data.taskId === id) {
+      updateTaskStatus(data.taskId, data.status as TaskStatus, data.progress);
+      updateTaskProgress(data.taskId, data.progress);
+      if (data.status === 'completed' || data.status === 'error') {
+        setIsSimulating(false);
+      }
     }
-  }, [isSimulating, task, updateTaskProgress, updateTaskStatus]);
+  }, [id, updateTaskStatus, updateTaskProgress]);
+
+  useEffect(() => {
+    if (id) {
+      fetchTask(id);
+    }
+
+    socketService.connect();
+    socketService.onTaskUpdate(handleTaskUpdate);
+
+    return () => {
+      socketService.offTaskUpdate(handleTaskUpdate);
+    };
+  }, [id, fetchTask, handleTaskUpdate]);
+
+  if (loading && !task) {
+    return (
+      <div className="flex flex-col items-center justify-center h-96">
+        <Loader2 className="w-12 h-12 text-tech-400 animate-spin mb-4" />
+        <p className="text-gray-400">加载中...</p>
+      </div>
+    );
+  }
+
+  if (error && !task) {
+    return (
+      <div className="flex flex-col items-center justify-center h-96">
+        <AlertTriangle className="w-16 h-16 text-red-500 mb-4" />
+        <p className="text-gray-400 mb-4">{error}</p>
+        <button
+          onClick={() => navigate('/tasks')}
+          className="px-4 py-2 rounded-lg bg-tech-500 text-white text-sm"
+        >
+          返回任务列表
+        </button>
+      </div>
+    );
+  }
 
   if (!task) {
     return (
@@ -81,11 +108,15 @@ export default function TaskDetail() {
     );
   }
 
-  const startSimulation = () => {
-    if (task.status === 'pending') {
-      updateTaskStatus(task.id, 'model_building', 10);
+  const startSimulation = async () => {
+    if (!id) return;
+    try {
+      setIsSimulating(true);
+      await startTask(id);
+    } catch (error) {
+      setIsSimulating(false);
+      console.error('Failed to start task:', error);
     }
-    setIsSimulating(true);
   };
 
   const pauseSimulation = () => {

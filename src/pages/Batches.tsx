@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { 
   Layers, 
   AlertTriangle, 
@@ -7,14 +7,78 @@ import {
   ChevronRight,
   AlertCircle,
   CheckCircle,
-  Clock
+  Loader2
 } from 'lucide-react';
-import { useTaskStore } from '@/store/useTaskStore';
-import type { BatchStatus } from '@/types';
+import { api } from '@/services/api';
+import type { Batch, BatchStatus, Task } from '@/types';
+
+interface BatchWithTasks extends Batch {
+  tasks: Task[];
+}
 
 export default function Batches() {
-  const { batches, tasks, getTasksByBatch } = useTaskStore();
+  const [batches, setBatches] = useState<BatchWithTasks[]>([]);
+  const [loading, setLoading] = useState(false);
   const [selectedBatch, setSelectedBatch] = useState<string | null>(null);
+  const [processing, setProcessing] = useState<string | null>(null);
+
+  const fetchBatches = async () => {
+    setLoading(true);
+    try {
+      const data = await api.batches.list() as any;
+      const batchList = Array.isArray(data) ? data : data.batches || [];
+      
+      const batchesWithTasks = await Promise.all(
+        batchList.map(async (b: any) => {
+          try {
+            const tasksData = await api.batches.getTasks(b.id) as any;
+            const tasks = Array.isArray(tasksData) ? tasksData : tasksData.tasks || [];
+            return {
+              ...b,
+              createdAt: new Date(b.createdAt),
+              tasks: tasks.map((t: any) => ({
+                ...t,
+                createdAt: new Date(t.createdAt),
+                warnings: t.warnings?.map((w: any) => ({ ...w, createdAt: new Date(w.createdAt) })) || [],
+              })),
+            };
+          } catch {
+            return {
+              ...b,
+              createdAt: new Date(b.createdAt),
+              tasks: [],
+            };
+          }
+        })
+      );
+      
+      setBatches(batchesWithTasks);
+    } catch (error) {
+      console.error('Failed to fetch batches:', error);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    fetchBatches();
+  }, []);
+
+  const handlePauseResume = async (batchId: string, currentStatus: BatchStatus) => {
+    try {
+      setProcessing(batchId);
+      if (currentStatus === 'paused') {
+        await api.batches.resume(batchId);
+      } else {
+        await api.batches.pause(batchId, '手动暂停');
+      }
+      fetchBatches();
+    } catch (error) {
+      console.error('Failed to update batch status:', error);
+    } finally {
+      setProcessing(null);
+    }
+  };
 
   const statusColors: Record<BatchStatus, string> = {
     active: 'bg-green-500/20 text-green-400 border-green-500/30',
@@ -28,14 +92,22 @@ export default function Batches() {
     completed: '已完成',
   };
 
+  if (loading && batches.length === 0) {
+    return (
+      <div className="flex flex-col items-center justify-center h-96">
+        <Loader2 className="w-12 h-12 text-tech-400 animate-spin mb-4" />
+        <p className="text-gray-400">加载中...</p>
+      </div>
+    );
+  }
+
   return (
     <div className="space-y-6">
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
         <div className="lg:col-span-2 space-y-4">
           {batches.map(batch => {
-            const batchTasks = getTasksByBatch(batch.id);
-            const completedCount = batchTasks.filter(t => t.status === 'completed').length;
-            const errorCount = batchTasks.filter(t => t.status === 'error').length;
+            const completedCount = batch.tasks.filter(t => t.status === 'completed').length;
+            const errorCount = batch.tasks.filter(t => t.status === 'error').length;
             const highNonuniform = batch.nonuniformCount >= 3;
             
             return (
@@ -102,20 +174,27 @@ export default function Batches() {
                       <h4 className="text-sm font-medium text-gray-300">任务列表</h4>
                       {batch.status !== 'completed' && (
                         <button
-                          onClick={(e) => { e.stopPropagation(); alert(batch.status === 'paused' ? '批次已恢复' : '批次已暂停'); }}
+                          onClick={(e) => { e.stopPropagation(); handlePauseResume(batch.id, batch.status); }}
+                          disabled={processing === batch.id}
                           className={`ml-auto px-3 py-1.5 rounded-lg text-xs font-medium flex items-center gap-1.5 ${
                             batch.status === 'paused' 
                               ? 'bg-green-500/20 text-green-400 hover:bg-green-500/30' 
                               : 'bg-plasma-orange/20 text-plasma-orange hover:bg-plasma-orange/30'
-                          }`}
+                          } disabled:opacity-50 disabled:cursor-not-allowed`}
                         >
-                          {batch.status === 'paused' ? <Play className="w-3.5 h-3.5" /> : <Pause className="w-3.5 h-3.5" />}
-                          {batch.status === 'paused' ? '恢复批次' : '暂停批次'}
+                          {processing === batch.id ? (
+                            <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                          ) : batch.status === 'paused' ? (
+                            <Play className="w-3.5 h-3.5" />
+                          ) : (
+                            <Pause className="w-3.5 h-3.5" />
+                          )}
+                          {processing === batch.id ? '处理中...' : batch.status === 'paused' ? '恢复批次' : '暂停批次'}
                         </button>
                       )}
                     </div>
                     <div className="space-y-2 max-h-48 overflow-y-auto scrollbar-thin">
-                      {batchTasks.map(task => (
+                      {batch.tasks.map(task => (
                         <div key={task.id} className="flex items-center justify-between p-3 rounded-lg bg-deep-800/30 hover:bg-deep-800/50 transition-colors">
                           <div>
                             <p className="text-sm text-white">{task.name}</p>
@@ -129,6 +208,11 @@ export default function Batches() {
                           </div>
                         </div>
                       ))}
+                      {batch.tasks.length === 0 && (
+                        <div className="text-center py-8 text-gray-500 text-sm">
+                          暂无任务
+                        </div>
+                      )}
                     </div>
                   </div>
                 )}

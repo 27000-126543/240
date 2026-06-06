@@ -3,10 +3,7 @@ import { v4 as uuidv4 } from 'uuid';
 import multer from 'multer';
 import path from 'path';
 import fs from 'fs';
-import { AppDataSource } from '../data-source';
-import { Task } from '../entities/Task';
-import { Batch } from '../entities/Batch';
-import { ParamAdjustment } from '../entities/ParamAdjustment';
+import { db } from '../db/database';
 import { simulationEngine } from '../services/simulationEngine';
 import { ProcessParams, TaskStatus } from '../types';
 
@@ -39,28 +36,33 @@ const upload = multer({
   }
 });
 
-const taskRepository = AppDataSource.getRepository(Task);
-const batchRepository = AppDataSource.getRepository(Batch);
-const adjustmentRepository = AppDataSource.getRepository(ParamAdjustment);
-
 router.get('/', async (req: Request, res: Response) => {
   try {
     const { batchId, status, page = 1, limit = 20 } = req.query;
     
-    const where: any = {};
-    if (batchId) where.batchId = batchId;
-    if (status) where.status = status;
+    let filteredTasks = db.getAll('tasks');
+    if (batchId) {
+      filteredTasks = filteredTasks.filter((t: any) => t.batchId === batchId);
+    }
+    if (status) {
+      filteredTasks = filteredTasks.filter((t: any) => t.status === status);
+    }
 
-    const [tasks, total] = await taskRepository.findAndCount({
-      where,
-      order: { createdAt: 'DESC' },
-      skip: (Number(page) - 1) * Number(limit),
-      take: Number(limit),
-      relations: ['warnings', 'approvals', 'adjustments']
-    });
+    filteredTasks.sort((a: any, b: any) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+
+    const total = filteredTasks.length;
+    const start = (Number(page) - 1) * Number(limit);
+    const tasks = filteredTasks.slice(start, start + Number(limit));
+
+    const tasksWithRelations = tasks.map((task: any) => ({
+      ...task,
+      warnings: db.find('warnings', (w: any) => w.taskId === task.id),
+      approvals: db.find('approvals', (a: any) => a.taskId === task.id),
+      adjustments: db.find('adjustments', (a: any) => a.taskId === task.id)
+    }));
 
     res.json({
-      data: tasks,
+      data: tasksWithRelations,
       total,
       page: Number(page),
       limit: Number(limit)
@@ -72,16 +74,20 @@ router.get('/', async (req: Request, res: Response) => {
 
 router.get('/:taskId', async (req: Request, res: Response) => {
   try {
-    const task = await taskRepository.findOne({
-      where: { id: req.params.taskId },
-      relations: ['warnings', 'approvals', 'adjustments']
-    });
+    const task = db.findOne('tasks', (t: any) => t.id === req.params.taskId);
 
     if (!task) {
       return res.status(404).json({ error: '任务不存在' });
     }
 
-    res.json(task);
+    const taskWithRelations = {
+      ...task,
+      warnings: db.find('warnings', (w: any) => w.taskId === task.id),
+      approvals: db.find('approvals', (a: any) => a.taskId === task.id),
+      adjustments: db.find('adjustments', (a: any) => a.taskId === task.id)
+    };
+
+    res.json(taskWithRelations);
   } catch (error) {
     res.status(500).json({ error: '获取任务详情失败' });
   }
@@ -91,22 +97,24 @@ router.post('/', async (req: Request, res: Response) => {
   try {
     const { name, batchId, parameters } = req.body;
 
-    let batch = await batchRepository.findOne({ where: { id: batchId } });
+    let batch = db.findOne('batches', (b: any) => b.id === batchId);
     if (!batch) {
-      batch = batchRepository.create({
+      batch = db.create('batches', {
         id: batchId || uuidv4(),
         name: `批次-${new Date().toLocaleDateString()}`,
         status: 'active',
-        taskCount: 0
+        taskCount: 0,
+        completedCount: 0,
+        nonuniformCount: 0,
+        createdAt: new Date()
       });
-      await batchRepository.save(batch);
     }
 
     if (batch.status === 'paused') {
       return res.status(400).json({ error: '该批次已暂停，无法创建新任务' });
     }
 
-    const task = taskRepository.create({
+    const task = db.create('tasks', {
       id: uuidv4(),
       name,
       batchId: batch.id,
@@ -120,13 +128,14 @@ router.post('/', async (req: Request, res: Response) => {
         temperature: 25,
         time: 300
       },
-      adjustCount: 0
+      adjustCount: 0,
+      createdAt: new Date(),
+      updatedAt: new Date()
     });
 
-    await taskRepository.save(task);
-
-    batch.taskCount = (batch.taskCount || 0) + 1;
-    await batchRepository.save(batch);
+    db.update('batches', (b: any) => b.id === batch.id, {
+      taskCount: (batch.taskCount || 0) + 1
+    });
 
     res.status(201).json(task);
   } catch (error) {
@@ -137,7 +146,7 @@ router.post('/', async (req: Request, res: Response) => {
 
 router.post('/:taskId/upload', upload.single('maskFile'), async (req: Request, res: Response) => {
   try {
-    const task = await taskRepository.findOne({ where: { id: req.params.taskId } });
+    const task = db.findOne('tasks', (t: any) => t.id === req.params.taskId);
     if (!task) {
       return res.status(404).json({ error: '任务不存在' });
     }
@@ -148,9 +157,10 @@ router.post('/:taskId/upload', upload.single('maskFile'), async (req: Request, r
 
     const maskData = parseMaskFile(req.file.path);
 
-    task.maskFile = req.file.filename;
-    task.maskData = maskData;
-    await taskRepository.save(task);
+    const updatedTask = db.update('tasks', (t: any) => t.id === req.params.taskId, {
+      maskFile: req.file.filename,
+      maskData
+    });
 
     res.json({
       message: '掩模文件上传成功',
@@ -176,7 +186,7 @@ function parseMaskFile(filePath: string) {
 
 router.post('/:taskId/start', async (req: Request, res: Response) => {
   try {
-    const task = await taskRepository.findOne({ where: { id: req.params.taskId } });
+    const task = db.findOne('tasks', (t: any) => t.id === req.params.taskId);
     if (!task) {
       return res.status(404).json({ error: '任务不存在' });
     }
@@ -196,16 +206,18 @@ router.post('/:taskId/start', async (req: Request, res: Response) => {
 router.put('/:taskId/status', async (req: Request, res: Response) => {
   try {
     const { status } = req.body;
-    const task = await taskRepository.findOne({ where: { id: req.params.taskId } });
+    const task = db.findOne('tasks', (t: any) => t.id === req.params.taskId);
 
     if (!task) {
       return res.status(404).json({ error: '任务不存在' });
     }
 
-    task.status = status as TaskStatus;
-    await taskRepository.save(task);
+    const updatedTask = db.update('tasks', (t: any) => t.id === req.params.taskId, {
+      status: status as TaskStatus,
+      updatedAt: new Date()
+    });
 
-    res.json(task);
+    res.json(updatedTask);
   } catch (error) {
     res.status(500).json({ error: '更新任务状态失败' });
   }
@@ -213,7 +225,7 @@ router.put('/:taskId/status', async (req: Request, res: Response) => {
 
 router.get('/:taskId/metrics', async (req: Request, res: Response) => {
   try {
-    const task = await taskRepository.findOne({ where: { id: req.params.taskId } });
+    const task = db.findOne('tasks', (t: any) => t.id === req.params.taskId);
     if (!task) {
       return res.status(404).json({ error: '任务不存在' });
     }
@@ -232,21 +244,21 @@ router.get('/:taskId/metrics', async (req: Request, res: Response) => {
 router.post('/:taskId/adjust', async (req: Request, res: Response) => {
   try {
     const { parameters, reason, adjustedBy } = req.body;
-    const task = await taskRepository.findOne({ where: { id: req.params.taskId } });
+    const task = db.findOne('tasks', (t: any) => t.id === req.params.taskId);
 
     if (!task) {
       return res.status(404).json({ error: '任务不存在' });
     }
 
-    const adjustment = adjustmentRepository.create({
+    const adjustment = db.create('adjustments', {
       id: uuidv4(),
       taskId: task.id,
       beforeParams: task.parameters,
       afterParams: { ...task.parameters, ...parameters },
       reason,
-      adjustedBy: adjustedBy || 'system'
+      adjustedBy: adjustedBy || 'system',
+      createdAt: new Date()
     });
-    await adjustmentRepository.save(adjustment);
 
     const updatedTask = await simulationEngine.adjustParameters(
       task.id,
@@ -263,13 +275,13 @@ router.post('/:taskId/adjust', async (req: Request, res: Response) => {
 
 router.delete('/:taskId', async (req: Request, res: Response) => {
   try {
-    const task = await taskRepository.findOne({ where: { id: req.params.taskId } });
+    const task = db.findOne('tasks', (t: any) => t.id === req.params.taskId);
     if (!task) {
       return res.status(404).json({ error: '任务不存在' });
     }
 
     simulationEngine.stopTask(task.id);
-    await taskRepository.remove(task);
+    db.remove('tasks', (t: any) => t.id === req.params.taskId);
 
     res.json({ message: '任务已删除' });
   } catch (error) {

@@ -1,9 +1,8 @@
-import 'reflect-metadata';
 import express from 'express';
 import cors from 'cors';
 import http from 'http';
 import { Server as SocketIOServer } from 'socket.io';
-import { AppDataSource } from './data-source';
+import { db } from './db/database';
 import { taskRoutes } from './routes/taskRoutes';
 import { batchRoutes } from './routes/batchRoutes';
 import { warningRoutes } from './routes/warningRoutes';
@@ -42,22 +41,15 @@ io.on('connection', (socket) => {
   });
 });
 
-const PORT = process.env.PORT || 3001;
+const PORT = process.env.PORT || 3002;
 
-AppDataSource.initialize()
-  .then(async () => {
-    console.log('Database connected successfully');
-    
-    server.listen(PORT, () => {
-      console.log(`Server is running on port ${PORT}`);
-      console.log(`WebSocket server ready`);
-    });
-    
-    simulationEngine.initialize(io);
-  })
-  .catch((error) => {
-    console.error('Database connection failed:', error);
-    process.exit(1);
-  });
+console.log('JSON database loaded successfully');
+
+server.listen(PORT, () => {
+  console.log(`Server is running on port ${PORT}`);
+  console.log(`WebSocket server ready`);
+});
+
+simulationEngine.initialize(io);
 
 export { io };

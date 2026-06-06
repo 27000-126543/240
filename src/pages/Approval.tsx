@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { 
   CheckCircle, 
@@ -7,41 +7,81 @@ import {
   User,
   ChevronRight,
   MessageSquare,
-  Filter
+  Filter,
+  Loader2
 } from 'lucide-react';
 import { StatusBadge } from '@/components/ui/StatusBadge';
-import { useTaskStore } from '@/store/useTaskStore';
-import type { ApprovalStatus } from '@/types';
+import { api } from '@/services/api';
+import type { ApprovalStatus, ApprovalRecord, Task } from '@/types';
+
+interface ApprovalWithTask extends ApprovalRecord {
+  taskName: string;
+  taskId: string;
+  taskStatus: Task['status'];
+}
 
 export default function Approval() {
-  const { tasks, updateApproval } = useTaskStore();
   const navigate = useNavigate();
+  const [approvals, setApprovals] = useState<ApprovalWithTask[]>([]);
+  const [loading, setLoading] = useState(false);
   const [filter, setFilter] = useState<'all' | 'pending' | 'approved' | 'rejected'>('pending');
   const [selectedApproval, setSelectedApproval] = useState<{ taskId: string; approvalId: string } | null>(null);
   const [comment, setComment] = useState('');
+  const [processing, setProcessing] = useState(false);
 
-  const pendingApprovals = tasks.flatMap(task => 
-    task.approvals.map(approval => ({
-      ...approval,
-      taskName: task.name,
-      taskId: task.id,
-      taskStatus: task.status,
-    }))
-  ).filter(a => filter === 'all' ? true : a.status === filter);
+  const fetchApprovals = useCallback(async () => {
+    setLoading(true);
+    try {
+      const data = await api.approvals.list(filter !== 'all' ? { status: filter } : undefined) as any;
+      const approvalList = Array.isArray(data) ? data : data.approvals || [];
+      setApprovals(approvalList.map((a: any) => ({
+        ...a,
+        createdAt: new Date(a.createdAt),
+      })));
+    } catch (error) {
+      console.error('Failed to fetch approvals:', error);
+    } finally {
+      setLoading(false);
+    }
+  }, [filter]);
 
-  const handleApprove = () => {
-    if (selectedApproval) {
-      updateApproval(selectedApproval.taskId, selectedApproval.approvalId, 'approved', comment || '审批通过');
+  useEffect(() => {
+    fetchApprovals();
+  }, [fetchApprovals]);
+
+  const handleApprove = async () => {
+    if (!selectedApproval || processing) return;
+    try {
+      setProcessing(true);
+      await api.approvals.decide(selectedApproval.approvalId, {
+        status: 'approved',
+        comment: comment || '审批通过',
+      });
       setSelectedApproval(null);
       setComment('');
+      fetchApprovals();
+    } catch (error) {
+      console.error('Failed to approve:', error);
+    } finally {
+      setProcessing(false);
     }
   };
 
-  const handleReject = () => {
-    if (selectedApproval) {
-      updateApproval(selectedApproval.taskId, selectedApproval.approvalId, 'rejected', comment || '需要优化');
+  const handleReject = async () => {
+    if (!selectedApproval || processing) return;
+    try {
+      setProcessing(true);
+      await api.approvals.decide(selectedApproval.approvalId, {
+        status: 'rejected',
+        comment: comment || '需要优化',
+      });
       setSelectedApproval(null);
       setComment('');
+      fetchApprovals();
+    } catch (error) {
+      console.error('Failed to reject:', error);
+    } finally {
+      setProcessing(false);
     }
   };
 
@@ -56,6 +96,15 @@ export default function Approval() {
     approved: 'text-green-400 bg-green-500/20',
     rejected: 'text-red-400 bg-red-500/20',
   };
+
+  if (loading && approvals.length === 0) {
+    return (
+      <div className="flex flex-col items-center justify-center h-96">
+        <Loader2 className="w-12 h-12 text-tech-400 animate-spin mb-4" />
+        <p className="text-gray-400">加载中...</p>
+      </div>
+    );
+  }
 
   return (
     <div className="space-y-6">
@@ -84,13 +133,13 @@ export default function Approval() {
             <h3 className="font-display font-semibold text-white">审批列表</h3>
           </div>
           <div className="divide-y divide-tech-500/10 max-h-[600px] overflow-y-auto scrollbar-thin">
-            {pendingApprovals.length === 0 ? (
+            {approvals.length === 0 ? (
               <div className="p-12 text-center">
                 <CheckCircle className="w-12 h-12 mx-auto mb-4 text-green-500 opacity-50" />
                 <p className="text-gray-400">暂无{filter === 'all' ? '' : filter === 'pending' ? '待处理的' : ''}审批项</p>
               </div>
             ) : (
-              pendingApprovals.map(approval => (
+              approvals.map(approval => (
                 <div
                   key={approval.id}
                   onClick={() => setSelectedApproval({ taskId: approval.taskId, approvalId: approval.id })}
@@ -159,16 +208,26 @@ export default function Approval() {
               <div className="grid grid-cols-2 gap-3">
                 <button
                   onClick={handleReject}
-                  className="h-10 rounded-lg bg-red-500/20 text-red-400 border border-red-500/30 text-sm font-medium flex items-center justify-center gap-2 hover:bg-red-500/30 transition-all"
+                  disabled={processing}
+                  className="h-10 rounded-lg bg-red-500/20 text-red-400 border border-red-500/30 text-sm font-medium flex items-center justify-center gap-2 hover:bg-red-500/30 transition-all disabled:opacity-50 disabled:cursor-not-allowed"
                 >
-                  <XCircle className="w-4 h-4" />
+                  {processing ? (
+                    <Loader2 className="w-4 h-4 animate-spin" />
+                  ) : (
+                    <XCircle className="w-4 h-4" />
+                  )}
                   拒绝
                 </button>
                 <button
                   onClick={handleApprove}
-                  className="h-10 rounded-lg bg-green-500/20 text-green-400 border border-green-500/30 text-sm font-medium flex items-center justify-center gap-2 hover:bg-green-500/30 transition-all"
+                  disabled={processing}
+                  className="h-10 rounded-lg bg-green-500/20 text-green-400 border border-green-500/30 text-sm font-medium flex items-center justify-center gap-2 hover:bg-green-500/30 transition-all disabled:opacity-50 disabled:cursor-not-allowed"
                 >
-                  <CheckCircle className="w-4 h-4" />
+                  {processing ? (
+                    <Loader2 className="w-4 h-4 animate-spin" />
+                  ) : (
+                    <CheckCircle className="w-4 h-4" />
+                  )}
                   通过
                 </button>
               </div>

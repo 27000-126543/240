@@ -1,3 +1,4 @@
+import { useEffect } from 'react';
 import { 
   CheckCircle2, 
   Gauge, 
@@ -6,7 +7,8 @@ import {
   AlertTriangle,
   Clock,
   ChevronRight,
-  Zap
+  Zap,
+  Loader2
 } from 'lucide-react';
 import { 
   RadarChart, 
@@ -15,8 +17,6 @@ import {
   PolarRadiusAxis, 
   Radar, 
   ResponsiveContainer,
-  LineChart,
-  Line,
   XAxis,
   YAxis,
   CartesianGrid,
@@ -27,26 +27,34 @@ import {
 import { StatCard } from '@/components/ui/StatCard';
 import { StatusBadge } from '@/components/ui/StatusBadge';
 import { useDashboardStore } from '@/store/useDashboardStore';
-import { useTaskStore } from '@/store/useTaskStore';
 import { useNavigate } from 'react-router-dom';
 
-const weeklyData = [
-  { day: '周一', completed: 8, active: 5 },
-  { day: '周二', completed: 12, active: 7 },
-  { day: '周三', completed: 10, active: 8 },
-  { day: '周四', completed: 15, active: 6 },
-  { day: '周五', completed: 9, active: 10 },
-  { day: '周六', completed: 5, active: 3 },
-  { day: '周日', completed: 3, active: 2 },
-];
-
 export default function Dashboard() {
-  const { stats, capability } = useDashboardStore();
-  const { tasks } = useTaskStore();
+  const { stats, capability, weeklyTrends, activeTasks, recentWarnings, loading, fetchAll } = useDashboardStore();
   const navigate = useNavigate();
   
-  const activeTasks = tasks.filter(t => !['completed', 'error', 'pending'].includes(t.status)).slice(0, 5);
-  const recentWarnings = tasks.flatMap(t => t.warnings.map(w => ({ ...w, taskName: t.name, taskId: t.id }))).slice(0, 4);
+  useEffect(() => {
+    fetchAll();
+  }, [fetchAll]);
+
+  const displayWeeklyTrends = weeklyTrends.length > 0 ? weeklyTrends : [
+    { day: '周一', completed: 8, active: 5 },
+    { day: '周二', completed: 12, active: 7 },
+    { day: '周三', completed: 10, active: 8 },
+    { day: '周四', completed: 15, active: 6 },
+    { day: '周五', completed: 9, active: 10 },
+    { day: '周六', completed: 5, active: 3 },
+    { day: '周日', completed: 3, active: 2 },
+  ];
+
+  if (loading) {
+    return (
+      <div className="flex flex-col items-center justify-center h-96">
+        <Loader2 className="w-12 h-12 text-tech-400 animate-spin mb-4" />
+        <p className="text-gray-400">加载中...</p>
+      </div>
+    );
+  }
 
   return (
     <div className="space-y-6">
@@ -141,7 +149,7 @@ export default function Dashboard() {
           </div>
           <div className="h-72">
             <ResponsiveContainer width="100%" height="100%">
-              <AreaChart data={weeklyData}>
+              <AreaChart data={displayWeeklyTrends}>
                 <defs>
                   <linearGradient id="colorCompleted" x1="0" y1="0" x2="0" y2="1">
                     <stop offset="5%" stopColor="#10B981" stopOpacity={0.3}/>
@@ -247,7 +255,7 @@ export default function Dashboard() {
                   <div className="flex items-start justify-between">
                     <div className="flex-1">
                       <p className="text-sm font-medium text-white">{warning.message}</p>
-                      <p className="text-xs text-gray-400 mt-1">{warning.taskName}</p>
+                      <p className="text-xs text-gray-400 mt-1">任务ID: {warning.taskId}</p>
                     </div>
                     <AlertTriangle className="w-5 h-5 text-plasma-orange flex-shrink-0 ml-3 animate-pulse" />
                   </div>

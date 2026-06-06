@@ -1,30 +1,60 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { 
   FileText, 
   Download, 
-  FileSpreadsheet,
-  FileImage,
-  ChevronRight,
   Calendar,
   Filter,
   Eye,
-  Printer,
-  CheckCircle
+  CheckCircle,
+  Loader2
 } from 'lucide-react';
 import { useTaskStore } from '@/store/useTaskStore';
-import { StatusBadge } from '@/components/ui/StatusBadge';
+import { api } from '@/services/api';
 
 export default function Reports() {
-  const { tasks } = useTaskStore();
+  const { tasks, fetchTasks, loading: tasksLoading } = useTaskStore();
   const [viewMode, setViewMode] = useState<'list' | 'preview'>('list');
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
+  const [exporting, setExporting] = useState(false);
+
+  useEffect(() => {
+    fetchTasks();
+  }, [fetchTasks]);
 
   const completedTasks = tasks.filter(t => t.status === 'completed' && t.result);
   const selectedTask = selectedTaskId ? tasks.find(t => t.id === selectedTaskId) : null;
 
-  const exportData = (format: 'pdf' | 'csv' | 'excel') => {
-    alert(`正在导出为 ${format.toUpperCase()} 格式...`);
+  const exportData = async (format: 'pdf' | 'csv' | 'excel') => {
+    if (!selectedTaskId) {
+      alert('请先选择一个任务');
+      return;
+    }
+    try {
+      setExporting(true);
+      if (format === 'pdf') {
+        const url = api.reports.getPdf(selectedTaskId);
+        window.open(url, '_blank');
+      } else {
+        const data = await api.reports.export(selectedTaskId, { format });
+        console.log('Export data:', data);
+        alert(`已导出为 ${format.toUpperCase()} 格式`);
+      }
+    } catch (error) {
+      console.error('Export failed:', error);
+      alert('导出失败，请重试');
+    } finally {
+      setExporting(false);
+    }
   };
+
+  if (tasksLoading && completedTasks.length === 0) {
+    return (
+      <div className="flex flex-col items-center justify-center h-96">
+        <Loader2 className="w-12 h-12 text-tech-400 animate-spin mb-4" />
+        <p className="text-gray-400">加载中...</p>
+      </div>
+    );
+  }
 
   return (
     <div className="space-y-6">
@@ -45,9 +75,14 @@ export default function Reports() {
         <div className="flex items-center gap-2">
           <button
             onClick={() => exportData('pdf')}
-            className="h-10 px-4 rounded-lg bg-deep-800/50 border border-tech-500/20 text-gray-300 text-sm font-medium flex items-center gap-2 hover:border-tech-500/40 transition-all"
+            disabled={exporting || !selectedTaskId}
+            className="h-10 px-4 rounded-lg bg-deep-800/50 border border-tech-500/20 text-gray-300 text-sm font-medium flex items-center gap-2 hover:border-tech-500/40 transition-all disabled:opacity-50 disabled:cursor-not-allowed"
           >
-            <FileText className="w-4 h-4" />
+            {exporting ? (
+              <Loader2 className="w-4 h-4 animate-spin" />
+            ) : (
+              <FileText className="w-4 h-4" />
+            )}
             批量导出PDF
           </button>
         </div>
@@ -157,7 +192,7 @@ export default function Reports() {
                         <Eye className="w-4 h-4" />
                       </button>
                       <button
-                        onClick={() => exportData('pdf')}
+                        onClick={() => { setSelectedTaskId(task.id); exportData('pdf'); }}
                         className="p-2 rounded-lg hover:bg-tech-500/20 text-gray-400 hover:text-tech-300 transition-all"
                       >
                         <Download className="w-4 h-4" />
@@ -182,9 +217,14 @@ export default function Reports() {
             <div className="flex-1" />
             <button
               onClick={() => exportData('pdf')}
-              className="h-10 px-4 rounded-lg bg-gradient-to-r from-tech-500 to-cyan-500 text-white text-sm font-medium flex items-center gap-2 hover:shadow-glow transition-all"
+              disabled={exporting}
+              className="h-10 px-4 rounded-lg bg-gradient-to-r from-tech-500 to-cyan-500 text-white text-sm font-medium flex items-center gap-2 hover:shadow-glow transition-all disabled:opacity-50 disabled:cursor-not-allowed"
             >
-              <Download className="w-4 h-4" />
+              {exporting ? (
+                <Loader2 className="w-4 h-4 animate-spin" />
+              ) : (
+                <Download className="w-4 h-4" />
+              )}
               导出PDF
             </button>
           </div>

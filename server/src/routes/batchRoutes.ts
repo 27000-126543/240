@@ -1,22 +1,20 @@
 import { Router, Request, Response } from 'express';
 import { v4 as uuidv4 } from 'uuid';
-import { AppDataSource } from '../data-source';
-import { Batch } from '../entities/Batch';
-import { Task } from '../entities/Task';
+import { db } from '../db/database';
 
 const router = Router();
 
-const batchRepository = AppDataSource.getRepository(Batch);
-const taskRepository = AppDataSource.getRepository(Task);
-
 router.get('/', async (req: Request, res: Response) => {
   try {
-    const batches = await batchRepository.find({
-      order: { createdAt: 'DESC' },
-      relations: ['tasks']
-    });
+    let batches = db.getAll('batches');
+    batches.sort((a: any, b: any) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
 
-    res.json(batches);
+    const batchesWithTasks = batches.map((batch: any) => ({
+      ...batch,
+      tasks: db.find('tasks', (t: any) => t.batchId === batch.id)
+    }));
+
+    res.json(batchesWithTasks);
   } catch (error) {
     res.status(500).json({ error: '获取批次列表失败' });
   }
@@ -24,16 +22,18 @@ router.get('/', async (req: Request, res: Response) => {
 
 router.get('/:batchId', async (req: Request, res: Response) => {
   try {
-    const batch = await batchRepository.findOne({
-      where: { id: req.params.batchId },
-      relations: ['tasks']
-    });
+    const batch = db.findOne('batches', (b: any) => b.id === req.params.batchId);
 
     if (!batch) {
       return res.status(404).json({ error: '批次不存在' });
     }
 
-    res.json(batch);
+    const batchWithTasks = {
+      ...batch,
+      tasks: db.find('tasks', (t: any) => t.batchId === batch.id)
+    };
+
+    res.json(batchWithTasks);
   } catch (error) {
     res.status(500).json({ error: '获取批次详情失败' });
   }
@@ -41,13 +41,16 @@ router.get('/:batchId', async (req: Request, res: Response) => {
 
 router.get('/:batchId/tasks', async (req: Request, res: Response) => {
   try {
-    const tasks = await taskRepository.find({
-      where: { batchId: req.params.batchId },
-      order: { createdAt: 'DESC' },
-      relations: ['warnings', 'approvals']
-    });
+    let tasks = db.find('tasks', (t: any) => t.batchId === req.params.batchId);
+    tasks.sort((a: any, b: any) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
 
-    res.json(tasks);
+    const tasksWithRelations = tasks.map((task: any) => ({
+      ...task,
+      warnings: db.find('warnings', (w: any) => w.taskId === task.id),
+      approvals: db.find('approvals', (a: any) => a.taskId === task.id)
+    }));
+
+    res.json(tasksWithRelations);
   } catch (error) {
     res.status(500).json({ error: '获取批次任务失败' });
   }
@@ -57,16 +60,16 @@ router.post('/', async (req: Request, res: Response) => {
   try {
     const { name } = req.body;
 
-    const batch = batchRepository.create({
+    const batch = db.create('batches', {
       id: uuidv4(),
       name: name || `批次-${new Date().toLocaleDateString()}`,
       status: 'active',
       nonuniformCount: 0,
       taskCount: 0,
-      completedCount: 0
+      completedCount: 0,
+      createdAt: new Date()
     });
 
-    await batchRepository.save(batch);
     res.status(201).json(batch);
   } catch (error) {
     res.status(500).json({ error: '创建批次失败' });
@@ -76,17 +79,18 @@ router.post('/', async (req: Request, res: Response) => {
 router.put('/:batchId/pause', async (req: Request, res: Response) => {
   try {
     const { reason } = req.body;
-    const batch = await batchRepository.findOne({ where: { id: req.params.batchId } });
+    const batch = db.findOne('batches', (b: any) => b.id === req.params.batchId);
 
     if (!batch) {
       return res.status(404).json({ error: '批次不存在' });
     }
 
-    batch.status = 'paused';
-    batch.pauseReason = reason || '手动暂停';
-    await batchRepository.save(batch);
+    const updatedBatch = db.update('batches', (b: any) => b.id === req.params.batchId, {
+      status: 'paused',
+      pauseReason: reason || '手动暂停'
+    });
 
-    res.json({ message: '批次已暂停', batch });
+    res.json({ message: '批次已暂停', batch: updatedBatch });
   } catch (error) {
     res.status(500).json({ error: '暂停批次失败' });
   }
@@ -94,18 +98,19 @@ router.put('/:batchId/pause', async (req: Request, res: Response) => {
 
 router.put('/:batchId/resume', async (req: Request, res: Response) => {
   try {
-    const batch = await batchRepository.findOne({ where: { id: req.params.batchId } });
+    const batch = db.findOne('batches', (b: any) => b.id === req.params.batchId);
 
     if (!batch) {
       return res.status(404).json({ error: '批次不存在' });
     }
 
-    batch.status = 'active';
-    batch.pauseReason = null as any;
-    batch.nonuniformCount = 0;
-    await batchRepository.save(batch);
+    const updatedBatch = db.update('batches', (b: any) => b.id === req.params.batchId, {
+      status: 'active',
+      pauseReason: null,
+      nonuniformCount: 0
+    });
 
-    res.json({ message: '批次已恢复', batch });
+    res.json({ message: '批次已恢复', batch: updatedBatch });
   } catch (error) {
     res.status(500).json({ error: '恢复批次失败' });
   }

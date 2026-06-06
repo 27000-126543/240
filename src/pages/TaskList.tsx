@@ -1,14 +1,14 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { 
   Plus, 
   Filter, 
   Search,
-  Calendar,
   Zap,
   Gauge,
   Target,
-  ChevronRight
+  ChevronRight,
+  Loader2
 } from 'lucide-react';
 import { StatusBadge } from '@/components/ui/StatusBadge';
 import { ProgressBar } from '@/components/ui/ProgressBar';
@@ -28,11 +28,16 @@ const statusFilters: { value: 'all' | TaskStatus; label: string }[] = [
 ];
 
 export default function TaskList() {
-  const { tasks, batches } = useTaskStore();
+  const { tasks, batches, loading, fetchTasks, fetchBatches } = useTaskStore();
   const navigate = useNavigate();
   const [statusFilter, setStatusFilter] = useState<'all' | TaskStatus>('all');
   const [batchFilter, setBatchFilter] = useState<string>('all');
   const [searchQuery, setSearchQuery] = useState('');
+
+  useEffect(() => {
+    fetchTasks();
+    fetchBatches();
+  }, [fetchTasks, fetchBatches]);
 
   const filteredTasks = tasks.filter(task => {
     if (statusFilter !== 'all' && task.status !== statusFilter) return false;
@@ -40,6 +45,15 @@ export default function TaskList() {
     if (searchQuery && !task.name.toLowerCase().includes(searchQuery.toLowerCase()) && !task.id.toLowerCase().includes(searchQuery.toLowerCase())) return false;
     return true;
   });
+
+  if (loading && tasks.length === 0) {
+    return (
+      <div className="flex flex-col items-center justify-center h-96">
+        <Loader2 className="w-12 h-12 text-tech-400 animate-spin mb-4" />
+        <p className="text-gray-400">加载中...</p>
+      </div>
+    );
+  }
 
   return (
     <div className="space-y-6">

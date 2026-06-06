@@ -1,0 +1,52 @@
+{
+  "tasks": [],
+  "batches": [],
+  "warnings": [],
+  "approvals": [],
+  "adjustments": [],
+  "recommendations": [],
+  "dailyStats": [
+    {
+      "id": "850697ac-8033-4f9b-b20b-6bfce9fcece0",
+      "date": "2026-06-06",
+      "completionRate": 0,
+      "rateDeviation": 0,
+      "optimizationCount": 0,
+      "totalTasks": 0,
+      "completedTasks": 0,
+      "processCapability": [
+        {
+          "dimension": "刻蚀速率控制",
+          "value": 85,
+          "fullMark": 100
+        },
+        {
+          "dimension": "剖面角度精度",
+          "value": 92,
+          "fullMark": 100
+        },
+        {
+          "dimension": "选择比控制",
+          "value": 88,
+          "fullMark": 100
+        },
+        {
+          "dimension": "均匀性控制",
+          "value": 90,
+          "fullMark": 100
+        },
+        {
+          "dimension": "粗糙度控制",
+          "value": 87,
+          "fullMark": 100
+        },
+        {
+          "dimension": "工艺稳定性",
+          "value": 83,
+          "fullMark": 100
+        }
+      ],
+      "createdAt": "2026-06-06T09:51:20.426Z"
+    }
+  ]
+}
