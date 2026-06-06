@@ -126,9 +126,14 @@ export const useTaskStore = create<TaskStore>((set, get) => ({
     try {
       const t = await api.tasks.get(taskId) as any;
       const task = convertTaskFromApi(t);
-      set(state => ({
-        tasks: state.tasks.map(t => t.id === taskId ? task : t),
-      }));
+      set(state => {
+        const exists = state.tasks.some(t => t.id === taskId);
+        if (exists) {
+          return { tasks: state.tasks.map(t => t.id === taskId ? task : t) };
+        } else {
+          return { tasks: [task, ...state.tasks] };
+        }
+      });
     } catch (error: any) {
       set({ error: error.message });
     } finally {

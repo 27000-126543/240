@@ -80,10 +80,26 @@ export const useDashboardStore = create<DashboardStore>((set, get) => ({
       const tasks = Array.isArray(data) ? data : data.tasks || [];
       set({ 
         activeTasks: tasks.map((t: any) => ({
-          ...t,
-          createdAt: new Date(t.createdAt),
-          startedAt: t.startedAt ? new Date(t.startedAt) : undefined,
-          warnings: t.warnings?.map((w: any) => ({ ...w, createdAt: new Date(w.createdAt) })) || [],
+          id: t.id,
+          batchId: t.batch_id || t.batchId,
+          name: t.name,
+          status: t.status,
+          progress: t.progress,
+          parameters: typeof t.parameters === 'string' ? JSON.parse(t.parameters) : t.parameters,
+          result: t.result ? (typeof t.result === 'string' ? JSON.parse(t.result) : t.result) : undefined,
+          warnings: (t.warnings || []).map((w: any) => ({
+            id: w.id,
+            taskId: w.task_id || w.taskId,
+            type: w.type,
+            message: w.message,
+            threshold: w.threshold,
+            actualValue: w.actual_value || w.actualValue,
+            acknowledged: Boolean(w.acknowledged),
+            createdAt: new Date(w.created_at || w.createdAt)
+          })),
+          adjustCount: t.adjust_count || t.adjustCount || 0,
+          createdAt: new Date(t.created_at || t.createdAt),
+          startedAt: t.started_at || t.startedAt ? new Date(t.started_at || t.startedAt) : undefined,
         }))
       });
     } catch (error: any) {
@@ -100,8 +116,16 @@ export const useDashboardStore = create<DashboardStore>((set, get) => ({
       const warnings = Array.isArray(data) ? data : data.warnings || [];
       set({ 
         recentWarnings: warnings.map((w: any) => ({
-          ...w,
-          createdAt: new Date(w.createdAt),
+          id: w.id,
+          taskId: w.task_id || w.taskId,
+          type: w.type,
+          message: w.message,
+          threshold: w.threshold,
+          actualValue: w.actual_value || w.actualValue,
+          acknowledged: Boolean(w.acknowledged),
+          acknowledgedBy: w.acknowledged_by || w.acknowledgedBy,
+          ackComment: w.ack_comment || w.ackComment,
+          createdAt: new Date(w.created_at || w.createdAt),
         }))
       });
     } catch (error: any) {

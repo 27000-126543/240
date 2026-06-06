@@ -38,7 +38,7 @@ import type { TaskStatus } from '@/types';
 const statusFlow: TaskStatus[] = ['pending', 'model_building', 'plasma_calculation', 'rate_analysis', 'profile_evolution', 'completed'];
 
 export default function TaskDetail() {
-  const { id } = useParams<{ id: string }>();
+  const { taskId: id } = useParams<{ taskId: string }>();
   const navigate = useNavigate();
   const { getTaskById, fetchTask, updateTaskStatus, updateTaskProgress, startTask, loading, error } = useTaskStore();
   const [activeTab, setActiveTab] = useState<'overview' | 'monitoring' | 'parameters' | 'history'>('overview');
