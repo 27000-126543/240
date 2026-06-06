@@ -1,6 +1,6 @@
 import { Router, Request, Response } from 'express';
 import { v4 as uuidv4 } from 'uuid';
-import { db } from '../db/database';
+import { db } from '../db/sqlite';
 
 const router = Router();
 
@@ -8,22 +8,29 @@ router.get('/', async (req: Request, res: Response) => {
   try {
     const { status, level, taskId } = req.query;
     
-    let approvals = db.getAll('approvals');
+    let sql = 'SELECT * FROM approvals WHERE 1=1';
+    const params: any[] = [];
+    
     if (status) {
-      approvals = approvals.filter((a: any) => a.status === status);
+      sql += ' AND status = ?';
+      params.push(status);
     }
     if (level) {
-      approvals = approvals.filter((a: any) => a.level === level);
+      sql += ' AND level = ?';
+      params.push(level);
     }
     if (taskId) {
-      approvals = approvals.filter((a: any) => a.taskId === taskId);
+      sql += ' AND task_id = ?';
+      params.push(taskId);
     }
-
-    approvals.sort((a: any, b: any) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+    
+    sql += ' ORDER BY created_at DESC';
+    
+    const approvals = db.all(sql, params);
 
     const approvalsWithTask = approvals.map((approval: any) => ({
       ...approval,
-      task: db.findOne('tasks', (t: any) => t.id === approval.taskId)
+      task: db.get('SELECT * FROM tasks WHERE id = ?', [approval.task_id])
     }));
 
     res.json(approvalsWithTask);
@@ -36,19 +43,18 @@ router.post('/', async (req: Request, res: Response) => {
   try {
     const { taskId, level, approver } = req.body;
 
-    const task = db.findOne('tasks', (t: any) => t.id === taskId);
+    const task = db.get('SELECT * FROM tasks WHERE id = ?', [taskId]);
     if (!task) {
       return res.status(404).json({ error: '任务不存在' });
     }
 
-    const approval = db.create('approvals', {
-      id: uuidv4(),
-      taskId,
-      level,
-      approver,
-      status: 'pending',
-      createdAt: new Date()
-    });
+    const approvalId = uuidv4();
+    db.run(`
+      INSERT INTO approvals (id, task_id, level, approver, status, created_at)
+      VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+    `, [approvalId, taskId, level, approver, 'pending']);
+
+    const approval = db.get('SELECT * FROM approvals WHERE id = ?', [approvalId]);
 
     res.status(201).json(approval);
   } catch (error) {
@@ -59,36 +65,34 @@ router.post('/', async (req: Request, res: Response) => {
 router.put('/:approvalId/decide', async (req: Request, res: Response) => {
   try {
     const { status, comment } = req.body;
-    const approval = db.findOne('approvals', (a: any) => a.id === req.params.approvalId);
+    const approval = db.get('SELECT * FROM approvals WHERE id = ?', [req.params.approvalId]);
 
     if (!approval) {
       return res.status(404).json({ error: '审批不存在' });
     }
 
-    const updatedApproval = db.update('approvals', (a: any) => a.id === req.params.approvalId, {
-      status,
-      comment: comment || '',
-      decidedAt: new Date()
-    });
+    db.run(`
+      UPDATE approvals 
+      SET status = ?, comment = ?, decided_at = CURRENT_TIMESTAMP
+      WHERE id = ?
+    `, [status, comment || '', req.params.approvalId]);
 
     if (status === 'approved' && approval.level === 'engineer') {
-      db.create('approvals', {
-        id: uuidv4(),
-        taskId: approval.taskId,
-        level: 'manager',
-        approver: 'system',
-        status: 'pending',
-        createdAt: new Date()
-      });
+      const managerApprovalId = uuidv4();
+      db.run(`
+        INSERT INTO approvals (id, task_id, level, approver, status, created_at)
+        VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+      `, [managerApprovalId, approval.task_id, 'manager', 'system', 'pending']);
     }
 
     if (status === 'approved' && approval.level === 'manager') {
-      console.log(`任务 ${approval.taskId} 已通过两级审批，准备推送至量产系统`);
+      console.log(`任务 ${approval.task_id} 已通过两级审批，准备推送至量产系统`);
     }
 
+    const updatedApproval = db.get('SELECT * FROM approvals WHERE id = ?', [req.params.approvalId]);
     const approvalWithTask = {
       ...updatedApproval,
-      task: db.findOne('tasks', (t: any) => t.id === approval.taskId)
+      task: db.get('SELECT * FROM tasks WHERE id = ?', [approval.task_id])
     };
 
     res.json({ message: '审批已处理', approval: approvalWithTask });
@@ -100,31 +104,30 @@ router.put('/:approvalId/decide', async (req: Request, res: Response) => {
 router.post('/:approvalId/submit-engineer', async (req: Request, res: Response) => {
   try {
     const { approver, comment } = req.body;
-    const approval = db.findOne('approvals', (a: any) => a.id === req.params.approvalId);
+    const approval = db.get('SELECT * FROM approvals WHERE id = ?', [req.params.approvalId]);
 
     if (!approval) {
       return res.status(404).json({ error: '审批不存在' });
     }
 
-    const updatedApproval = db.update('approvals', (a: any) => a.id === req.params.approvalId, {
-      status: 'approved',
-      comment: comment || '均匀性验证通过',
-      decidedAt: new Date(),
-      approver: approver || 'engineer'
-    });
+    db.run(`
+      UPDATE approvals 
+      SET status = ?, comment = ?, decided_at = CURRENT_TIMESTAMP, approver = ?
+      WHERE id = ?
+    `, ['approved', comment || '均匀性验证通过', approver || 'engineer', req.params.approvalId]);
 
-    const managerApproval = db.create('approvals', {
-      id: uuidv4(),
-      taskId: approval.taskId,
-      level: 'manager',
-      approver: 'pending',
-      status: 'pending',
-      createdAt: new Date()
-    });
+    const managerApprovalId = uuidv4();
+    db.run(`
+      INSERT INTO approvals (id, task_id, level, approver, status, created_at)
+      VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+    `, [managerApprovalId, approval.task_id, 'manager', 'pending', 'pending']);
 
+    const updatedApproval = db.get('SELECT * FROM approvals WHERE id = ?', [req.params.approvalId]);
+    const managerApproval = db.get('SELECT * FROM approvals WHERE id = ?', [managerApprovalId]);
+    
     const approvalWithTask = {
       ...updatedApproval,
-      task: db.findOne('tasks', (t: any) => t.id === approval.taskId)
+      task: db.get('SELECT * FROM tasks WHERE id = ?', [approval.task_id])
     };
 
     res.json({ 

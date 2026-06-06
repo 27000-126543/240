@@ -3,7 +3,7 @@ import { v4 as uuidv4 } from 'uuid';
 import multer from 'multer';
 import path from 'path';
 import fs from 'fs';
-import { db } from '../db/database';
+import { db } from '../db/sqlite';
 import { simulationEngine } from '../services/simulationEngine';
 import { ProcessParams, TaskStatus } from '../types';
 
@@ -40,25 +40,48 @@ router.get('/', async (req: Request, res: Response) => {
   try {
     const { batchId, status, page = 1, limit = 20 } = req.query;
     
-    let filteredTasks = db.getAll('tasks');
+    let sql = 'SELECT * FROM tasks WHERE 1=1';
+    const params: any[] = [];
+    
     if (batchId) {
-      filteredTasks = filteredTasks.filter((t: any) => t.batchId === batchId);
+      sql += ' AND batch_id = ?';
+      params.push(batchId);
     }
     if (status) {
-      filteredTasks = filteredTasks.filter((t: any) => t.status === status);
+      sql += ' AND status = ?';
+      params.push(status);
     }
-
-    filteredTasks.sort((a: any, b: any) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
-
-    const total = filteredTasks.length;
-    const start = (Number(page) - 1) * Number(limit);
-    const tasks = filteredTasks.slice(start, start + Number(limit));
+    
+    sql += ' ORDER BY created_at DESC LIMIT ? OFFSET ?';
+    params.push(Number(limit), (Number(page) - 1) * Number(limit));
+    
+    const tasks = db.all(sql, params);
+    
+    let countSql = 'SELECT COUNT(*) as count FROM tasks WHERE 1=1';
+    const countParams: any[] = [];
+    if (batchId) {
+      countSql += ' AND batch_id = ?';
+      countParams.push(batchId);
+    }
+    if (status) {
+      countSql += ' AND status = ?';
+      countParams.push(status);
+    }
+    const total = db.count(countSql, countParams);
 
     const tasksWithRelations = tasks.map((task: any) => ({
       ...task,
-      warnings: db.find('warnings', (w: any) => w.taskId === task.id),
-      approvals: db.find('approvals', (a: any) => a.taskId === task.id),
-      adjustments: db.find('adjustments', (a: any) => a.taskId === task.id)
+      parameters: task.parameters ? JSON.parse(task.parameters) : null,
+      result: task.result ? JSON.parse(task.result) : null,
+      realtime_metrics: task.realtime_metrics ? JSON.parse(task.realtime_metrics) : null,
+      mask_data: task.mask_data ? JSON.parse(task.mask_data) : null,
+      warnings: db.all('SELECT * FROM warnings WHERE task_id = ?', [task.id]),
+      approvals: db.all('SELECT * FROM approvals WHERE task_id = ?', [task.id]),
+      adjustments: db.all('SELECT * FROM adjustments WHERE task_id = ?', [task.id]).map((a: any) => ({
+        ...a,
+        before_params: a.before_params ? JSON.parse(a.before_params) : null,
+        after_params: a.after_params ? JSON.parse(a.after_params) : null
+      }))
     }));
 
     res.json({
@@ -74,7 +97,7 @@ router.get('/', async (req: Request, res: Response) => {
 
 router.get('/:taskId', async (req: Request, res: Response) => {
   try {
-    const task = db.findOne('tasks', (t: any) => t.id === req.params.taskId);
+    const task = db.get('SELECT * FROM tasks WHERE id = ?', [req.params.taskId]);
 
     if (!task) {
       return res.status(404).json({ error: '任务不存在' });
@@ -82,9 +105,17 @@ router.get('/:taskId', async (req: Request, res: Response) => {
 
     const taskWithRelations = {
       ...task,
-      warnings: db.find('warnings', (w: any) => w.taskId === task.id),
-      approvals: db.find('approvals', (a: any) => a.taskId === task.id),
-      adjustments: db.find('adjustments', (a: any) => a.taskId === task.id)
+      parameters: task.parameters ? JSON.parse(task.parameters) : null,
+      result: task.result ? JSON.parse(task.result) : null,
+      realtime_metrics: task.realtime_metrics ? JSON.parse(task.realtime_metrics) : null,
+      mask_data: task.mask_data ? JSON.parse(task.mask_data) : null,
+      warnings: db.all('SELECT * FROM warnings WHERE task_id = ?', [task.id]),
+      approvals: db.all('SELECT * FROM approvals WHERE task_id = ?', [task.id]),
+      adjustments: db.all('SELECT * FROM adjustments WHERE task_id = ?', [task.id]).map((a: any) => ({
+        ...a,
+        before_params: a.before_params ? JSON.parse(a.before_params) : null,
+        after_params: a.after_params ? JSON.parse(a.after_params) : null
+      }))
     };
 
     res.json(taskWithRelations);
@@ -96,48 +127,53 @@ router.get('/:taskId', async (req: Request, res: Response) => {
 router.post('/', async (req: Request, res: Response) => {
   try {
     const { name, batchId, parameters } = req.body;
+    const actualBatchId = batchId || uuidv4();
 
-    let batch = db.findOne('batches', (b: any) => b.id === batchId);
+    let batch = db.get('SELECT * FROM batches WHERE id = ?', [actualBatchId]);
     if (!batch) {
-      batch = db.create('batches', {
-        id: batchId || uuidv4(),
-        name: `批次-${new Date().toLocaleDateString()}`,
-        status: 'active',
-        taskCount: 0,
-        completedCount: 0,
-        nonuniformCount: 0,
-        createdAt: new Date()
-      });
+      db.run(`
+        INSERT INTO batches (id, name, status, nonuniform_count, task_count, completed_count, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+      `, [actualBatchId, `批次-${new Date().toLocaleDateString()}`, 'active', 0, 0, 0]);
+      batch = db.get('SELECT * FROM batches WHERE id = ?', [actualBatchId]);
+    }
+
+    if (!batch) {
+      return res.status(500).json({ error: '创建批次失败' });
     }
 
     if (batch.status === 'paused') {
       return res.status(400).json({ error: '该批次已暂停，无法创建新任务' });
     }
 
-    const task = db.create('tasks', {
-      id: uuidv4(),
-      name,
-      batchId: batch.id,
-      status: 'pending',
-      progress: 0,
-      parameters: parameters || {
-        rf_power: 800,
-        bias_power: 200,
-        pressure: 50,
-        gas_ratio: { Ar: 40, CF4: 30, O2: 30 },
-        temperature: 25,
-        time: 300
-      },
-      adjustCount: 0,
-      createdAt: new Date(),
-      updatedAt: new Date()
-    });
+    const taskId = uuidv4();
+    const taskParams = parameters || {
+      rf_power: 800,
+      bias_power: 200,
+      pressure: 50,
+      gas_ratio: { Ar: 40, CF4: 30, O2: 30 },
+      temperature: 25,
+      time: 300
+    };
+    
+    db.run(`
+      INSERT INTO tasks (id, batch_id, name, status, progress, parameters, adjust_count, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+    `, [taskId, actualBatchId, name, 'pending', 0, JSON.stringify(taskParams), 0]);
 
-    db.update('batches', (b: any) => b.id === batch.id, {
-      taskCount: (batch.taskCount || 0) + 1
-    });
+    db.run('UPDATE batches SET task_count = task_count + 1 WHERE id = ?', [actualBatchId]);
 
-    res.status(201).json(task);
+    const task = db.get('SELECT * FROM tasks WHERE id = ?', [taskId]);
+    if (!task) {
+      return res.status(500).json({ error: '创建任务失败' });
+    }
+    
+    const responseTask = {
+      ...task,
+      parameters: task.parameters ? JSON.parse(task.parameters) : null
+    };
+
+    res.status(201).json(responseTask);
   } catch (error) {
     console.error(error);
     res.status(500).json({ error: '创建任务失败' });
@@ -146,7 +182,7 @@ router.post('/', async (req: Request, res: Response) => {
 
 router.post('/:taskId/upload', upload.single('maskFile'), async (req: Request, res: Response) => {
   try {
-    const task = db.findOne('tasks', (t: any) => t.id === req.params.taskId);
+    const task = db.get('SELECT * FROM tasks WHERE id = ?', [req.params.taskId]);
     if (!task) {
       return res.status(404).json({ error: '任务不存在' });
     }
@@ -157,10 +193,11 @@ router.post('/:taskId/upload', upload.single('maskFile'), async (req: Request, r
 
     const maskData = parseMaskFile(req.file.path);
 
-    const updatedTask = db.update('tasks', (t: any) => t.id === req.params.taskId, {
-      maskFile: req.file.filename,
-      maskData
-    });
+    db.run(`
+      UPDATE tasks 
+      SET mask_file = ?, mask_data = ?, updated_at = CURRENT_TIMESTAMP
+      WHERE id = ?
+    `, [req.file.filename, JSON.stringify(maskData), req.params.taskId]);
 
     res.json({
       message: '掩模文件上传成功',
@@ -186,7 +223,7 @@ function parseMaskFile(filePath: string) {
 
 router.post('/:taskId/start', async (req: Request, res: Response) => {
   try {
-    const task = db.findOne('tasks', (t: any) => t.id === req.params.taskId);
+    const task = db.get('SELECT * FROM tasks WHERE id = ?', [req.params.taskId]);
     if (!task) {
       return res.status(404).json({ error: '任务不存在' });
     }
@@ -206,18 +243,26 @@ router.post('/:taskId/start', async (req: Request, res: Response) => {
 router.put('/:taskId/status', async (req: Request, res: Response) => {
   try {
     const { status } = req.body;
-    const task = db.findOne('tasks', (t: any) => t.id === req.params.taskId);
+    const task = db.get('SELECT * FROM tasks WHERE id = ?', [req.params.taskId]);
 
     if (!task) {
       return res.status(404).json({ error: '任务不存在' });
     }
 
-    const updatedTask = db.update('tasks', (t: any) => t.id === req.params.taskId, {
-      status: status as TaskStatus,
-      updatedAt: new Date()
-    });
+    db.run(`
+      UPDATE tasks 
+      SET status = ?, updated_at = CURRENT_TIMESTAMP
+      WHERE id = ?
+    `, [status as TaskStatus, req.params.taskId]);
 
-    res.json(updatedTask);
+    const updatedTask = db.get('SELECT * FROM tasks WHERE id = ?', [req.params.taskId]);
+    const responseTask = {
+      ...updatedTask,
+      parameters: updatedTask.parameters ? JSON.parse(updatedTask.parameters) : null,
+      result: updatedTask.result ? JSON.parse(updatedTask.result) : null
+    };
+
+    res.json(responseTask);
   } catch (error) {
     res.status(500).json({ error: '更新任务状态失败' });
   }
@@ -225,7 +270,7 @@ router.put('/:taskId/status', async (req: Request, res: Response) => {
 
 router.get('/:taskId/metrics', async (req: Request, res: Response) => {
   try {
-    const task = db.findOne('tasks', (t: any) => t.id === req.params.taskId);
+    const task = db.get('SELECT * FROM tasks WHERE id = ?', [req.params.taskId]);
     if (!task) {
       return res.status(404).json({ error: '任务不存在' });
     }
@@ -233,8 +278,8 @@ router.get('/:taskId/metrics', async (req: Request, res: Response) => {
     res.json({
       status: task.status,
       progress: task.progress,
-      metrics: task.realtimeMetrics || [],
-      result: task.result
+      metrics: task.realtime_metrics ? JSON.parse(task.realtime_metrics) : [],
+      result: task.result ? JSON.parse(task.result) : null
     });
   } catch (error) {
     res.status(500).json({ error: '获取监控数据失败' });
@@ -244,21 +289,19 @@ router.get('/:taskId/metrics', async (req: Request, res: Response) => {
 router.post('/:taskId/adjust', async (req: Request, res: Response) => {
   try {
     const { parameters, reason, adjustedBy } = req.body;
-    const task = db.findOne('tasks', (t: any) => t.id === req.params.taskId);
+    const task = db.get('SELECT * FROM tasks WHERE id = ?', [req.params.taskId]);
 
     if (!task) {
       return res.status(404).json({ error: '任务不存在' });
     }
 
-    const adjustment = db.create('adjustments', {
-      id: uuidv4(),
-      taskId: task.id,
-      beforeParams: task.parameters,
-      afterParams: { ...task.parameters, ...parameters },
-      reason,
-      adjustedBy: adjustedBy || 'system',
-      createdAt: new Date()
-    });
+    const taskParams = task.parameters ? JSON.parse(task.parameters) : {};
+    const adjustmentId = uuidv4();
+    
+    db.run(`
+      INSERT INTO adjustments (id, task_id, before_params, after_params, reason, adjusted_by, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+    `, [adjustmentId, task.id, JSON.stringify(taskParams), JSON.stringify({ ...taskParams, ...parameters }), reason, adjustedBy || 'system']);
 
     const updatedTask = await simulationEngine.adjustParameters(
       task.id,
@@ -267,7 +310,14 @@ router.post('/:taskId/adjust', async (req: Request, res: Response) => {
       adjustedBy || 'system'
     );
 
-    res.json({ task: updatedTask, adjustment });
+    const adjustment = db.get('SELECT * FROM adjustments WHERE id = ?', [adjustmentId]);
+    const responseAdjustment = {
+      ...adjustment,
+      before_params: adjustment.before_params ? JSON.parse(adjustment.before_params) : null,
+      after_params: adjustment.after_params ? JSON.parse(adjustment.after_params) : null
+    };
+
+    res.json({ task: updatedTask, adjustment: responseAdjustment });
   } catch (error: any) {
     res.status(500).json({ error: error.message || '参数调整失败' });
   }
@@ -275,13 +325,13 @@ router.post('/:taskId/adjust', async (req: Request, res: Response) => {
 
 router.delete('/:taskId', async (req: Request, res: Response) => {
   try {
-    const task = db.findOne('tasks', (t: any) => t.id === req.params.taskId);
+    const task = db.get('SELECT * FROM tasks WHERE id = ?', [req.params.taskId]);
     if (!task) {
       return res.status(404).json({ error: '任务不存在' });
     }
 
     simulationEngine.stopTask(task.id);
-    db.remove('tasks', (t: any) => t.id === req.params.taskId);
+    db.run('DELETE FROM tasks WHERE id = ?', [req.params.taskId]);
 
     res.json({ message: '任务已删除' });
   } catch (error) {

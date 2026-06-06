@@ -1,7 +1,9 @@
 import { Server } from 'socket.io';
 import { v4 as uuidv4 } from 'uuid';
-import { db } from '../db/database';
+import { db } from '../db/sqlite';
 import { TaskStatus, ProcessParams, SimulationResult, RealtimeMetrics } from '../types';
+import { physicsEngine } from './physicsEngine';
+import { maskParser } from './maskParser';
 
 const STATUS_FLOW: TaskStatus[] = [
   'pending',
@@ -13,15 +15,26 @@ const STATUS_FLOW: TaskStatus[] = [
 ];
 
 const STATUS_DURATIONS = {
-  model_building: 3000,
-  plasma_calculation: 5000,
-  rate_analysis: 3000,
-  profile_evolution: 4000,
+  model_building: { min: 3000, max: 5000 },
+  plasma_calculation: { min: 4000, max: 6000 },
+  rate_analysis: { min: 3000, max: 4000 },
+  profile_evolution: { min: 5000, max: 7000 },
 };
+
+interface RunningTaskInfo {
+  intervals: NodeJS.Timeout[];
+  startTime: number;
+  metricsHistory: RealtimeMetrics[];
+  currentStatus: TaskStatus;
+  params: ProcessParams;
+  maskModel?: any;
+  plasmaState?: any;
+  rateDistribution?: number[];
+}
 
 class SimulationEngine {
   private io: Server | null = null;
-  private runningTasks: Map<string, NodeJS.Timeout[]> = new Map();
+  private runningTasks: Map<string, RunningTaskInfo> = new Map();
 
   initialize(io: Server) {
     this.io = io;
@@ -29,307 +42,360 @@ class SimulationEngine {
   }
 
   async startTask(taskId: string) {
-    const task = db.findOne('tasks', (t) => t.id === taskId);
+    const task = db.get('SELECT * FROM tasks WHERE id = ?', [taskId]);
     if (!task) {
       throw new Error('Task not found');
     }
 
-    const batch = db.findOne('batches', (b) => b.id === task.batchId);
+    const batch = db.get('SELECT * FROM batches WHERE id = ?', [task.batch_id]);
     if (batch && batch.status === 'paused') {
       throw new Error('Batch is paused, cannot start task');
     }
 
-    const updatedTask = db.update('tasks', (t) => t.id === taskId, {
-      status: 'model_building',
-      startedAt: new Date(),
-      progress: 5,
-      realtimeMetrics: []
-    });
+    const params = typeof task.parameters === 'string' ? JSON.parse(task.parameters) : task.parameters;
+    
+    this.stopTask(taskId);
 
-    this.notifyTaskUpdate(updatedTask!);
-    this.processNextStatus(taskId);
+    const taskInfo: RunningTaskInfo = {
+      intervals: [],
+      startTime: Date.now(),
+      metricsHistory: [],
+      currentStatus: 'model_building',
+      params
+    };
+    this.runningTasks.set(taskId, taskInfo);
+
+    db.run(
+      'UPDATE tasks SET status = ?, started_at = ?, progress = ?, realtime_metrics = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?',
+      ['model_building', new Date().toISOString(), 5, JSON.stringify([]), taskId]
+    );
+
+    this.notifyTaskUpdate(taskId, 'model_building', 5);
+    this.processStatus(taskId, 'model_building');
   }
 
-  private async processNextStatus(taskId: string) {
-    const task = db.findOne('tasks', (t) => t.id === taskId);
+  private async processStatus(taskId: string, status: TaskStatus) {
+    const taskInfo = this.runningTasks.get(taskId);
+    if (!taskInfo) return;
+
+    taskInfo.currentStatus = status;
+
+    const task = db.get('SELECT * FROM tasks WHERE id = ?', [taskId]);
     if (!task || task.status === 'completed' || task.status === 'error') {
+      this.stopTask(taskId);
       return;
     }
 
-    const currentIndex = STATUS_FLOW.indexOf(task.status);
+    const durationRange = STATUS_DURATIONS[status as keyof typeof STATUS_DURATIONS];
+    if (!durationRange) {
+      if (status === 'completed') return;
+      await this.advanceToNextStatus(taskId, status);
+      return;
+    }
+
+    const duration = durationRange.min + Math.random() * (durationRange.max - durationRange.min);
+    const currentIndex = STATUS_FLOW.indexOf(status);
+    const baseProgress = (currentIndex / (STATUS_FLOW.length - 1)) * 100;
+    const nextBaseProgress = ((currentIndex + 1) / (STATUS_FLOW.length - 1)) * 100;
+    const progressRange = nextBaseProgress - baseProgress;
+
+    const startTime = Date.now();
+    const elapsedBefore = (Date.now() - taskInfo.startTime) / 1000;
+
+    if (status === 'model_building') {
+      try {
+        const maskFile = task.mask_file;
+        if (maskFile) {
+          taskInfo.maskModel = await maskParser.parseFile(maskFile, taskId);
+        } else {
+          taskInfo.maskModel = {
+            layers: [],
+            boundingBox: { minX: 0, maxX: 100, minY: 0, maxY: 100, width: 100, height: 100 },
+            featuresCount: 50,
+            threeDModel: { voxels: [], resolution: 1, depth: 50 }
+          };
+        }
+      } catch (e) {
+        console.error('Mask parsing failed:', e);
+        taskInfo.maskModel = {
+          layers: [],
+          boundingBox: { minX: 0, maxX: 100, minY: 0, maxY: 100, width: 100, height: 100 },
+          featuresCount: 50,
+          threeDModel: { voxels: [], resolution: 1, depth: 50 }
+        };
+      }
+    }
+
+    if (status === 'plasma_calculation') {
+      taskInfo.plasmaState = physicsEngine.calculatePlasmaState(taskInfo.params);
+    }
+
+    if (status === 'rate_analysis') {
+      taskInfo.rateDistribution = physicsEngine.generateRateDistribution(taskInfo.params, 100);
+    }
+
+    const metricsInterval = setInterval(() => {
+      const now = Date.now();
+      const elapsedInStatus = (now - startTime) / duration;
+      const progress = Math.min(95, baseProgress + progressRange * Math.min(1, elapsedInStatus));
+      const totalElapsed = (now - taskInfo.startTime) / 1000;
+
+      const metrics = this.calculateRealtimeMetrics(taskInfo, progress, totalElapsed, status);
+      taskInfo.metricsHistory.push(metrics);
+
+      if (taskInfo.metricsHistory.length > 500) {
+        taskInfo.metricsHistory = taskInfo.metricsHistory.slice(-500);
+      }
+
+      db.run(
+        'UPDATE tasks SET progress = ?, realtime_metrics = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?',
+        [progress, JSON.stringify(taskInfo.metricsHistory), taskId]
+      );
+
+      this.notifyTaskUpdate(taskId, status, progress);
+      this.notifyMetrics(taskId, metrics);
+      this.checkWarnings(taskId, task, metrics);
+
+      if (elapsedInStatus >= 1) {
+        clearInterval(metricsInterval);
+        this.advanceToNextStatus(taskId, status);
+      }
+    }, 5000);
+
+    taskInfo.intervals.push(metricsInterval);
+
+    setTimeout(() => {
+      clearInterval(metricsInterval);
+      if (taskInfo.currentStatus === status) {
+        this.advanceToNextStatus(taskId, status);
+      }
+    }, duration);
+  }
+
+  private calculateRealtimeMetrics(
+    taskInfo: RunningTaskInfo,
+    progress: number,
+    timeElapsed: number,
+    status: TaskStatus
+  ): RealtimeMetrics {
+    const metrics = physicsEngine.calculateAllMetrics(taskInfo.params, progress, timeElapsed);
+
+    const timeFactor = Math.min(1, timeElapsed / 30);
+    const fluctuation = 1 + (Math.random() - 0.5) * 0.1 * timeFactor;
+
+    return {
+      timestamp: new Date(),
+      profileAngle: Number((metrics.profileAngle * fluctuation).toFixed(2)),
+      selectivity: Number((metrics.selectivity * (1 + (Math.random() - 0.5) * 0.05)).toFixed(2)),
+      etchRate: Number((metrics.etchRate * fluctuation).toFixed(2)),
+      roughness: Number(metrics.roughness.toFixed(3)),
+      progress: Number(progress.toFixed(1))
+    };
+  }
+
+  private async advanceToNextStatus(taskId: string, currentStatus: TaskStatus) {
+    const taskInfo = this.runningTasks.get(taskId);
+    if (!taskInfo) return;
+
+    const currentIndex = STATUS_FLOW.indexOf(currentStatus);
     if (currentIndex === -1 || currentIndex >= STATUS_FLOW.length - 1) {
       return;
     }
 
     const nextStatus = STATUS_FLOW[currentIndex + 1] as TaskStatus;
-    const duration = STATUS_DURATIONS[nextStatus as keyof typeof STATUS_DURATIONS] || 2000;
-
-    const progressSteps = 10;
-    const stepDuration = duration / progressSteps;
-    const baseProgress = (currentIndex / (STATUS_FLOW.length - 1)) * 100;
-    const nextBaseProgress = ((currentIndex + 1) / (STATUS_FLOW.length - 1)) * 100;
-    const progressRange = nextBaseProgress - baseProgress;
-
-    let step = 0;
-    const intervalId = setInterval(async () => {
-      step++;
-      const progress = Math.min(95, baseProgress + (progressRange * step / progressSteps));
-      
-      const currentTask = db.findOne('tasks', (t) => t.id === taskId);
-      if (!currentTask) {
-        clearInterval(intervalId);
-        return;
-      }
-      
-      const metrics = this.generateRealtimeMetrics(currentTask, progress, nextStatus);
-      
-      const updatedRealtimeMetrics = currentTask.realtimeMetrics ? [...currentTask.realtimeMetrics] : [];
-      updatedRealtimeMetrics.push(metrics);
-      if (updatedRealtimeMetrics.length > 100) {
-        updatedRealtimeMetrics.splice(0, updatedRealtimeMetrics.length - 100);
-      }
-      
-      const updatedTask = db.update('tasks', (t) => t.id === taskId, {
-        progress,
-        realtimeMetrics: updatedRealtimeMetrics
-      });
-      
-      if (updatedTask) {
-        this.notifyTaskUpdate(updatedTask);
-        this.notifyMetrics(taskId, metrics);
-        await this.checkWarnings(updatedTask, metrics);
-      }
-
-      if (step >= progressSteps) {
-        clearInterval(intervalId);
-        await this.advanceStatus(taskId, nextStatus);
-      }
-    }, stepDuration);
-
-    this.addTaskTimeout(taskId, intervalId);
-  }
-
-  private async advanceStatus(taskId: string, nextStatus: TaskStatus) {
-    const task = db.findOne('tasks', (t) => t.id === taskId);
-    if (!task) return;
-
-    const updates: any = { status: nextStatus };
 
     if (nextStatus === 'completed') {
-      updates.progress = 100;
-      updates.completedAt = new Date();
-      updates.result = this.generateSimulationResult(task.parameters);
-    }
-
-    const updatedTask = db.update('tasks', (t) => t.id === taskId, updates);
-    
-    if (updatedTask) {
-      this.notifyTaskUpdate(updatedTask);
-
-      if (nextStatus === 'completed') {
-        await this.updateBatchAfterTaskCompletion(updatedTask);
-        await this.checkBatchNonuniformity(updatedTask.batchId);
-      }
-    }
-
-    if (nextStatus !== 'completed') {
-      setTimeout(() => this.processNextStatus(taskId), 500);
+      await this.completeTask(taskId);
+    } else {
+      db.run(
+        'UPDATE tasks SET status = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?',
+        [nextStatus, taskId]
+      );
+      this.notifyTaskUpdate(taskId, nextStatus, taskInfo.metricsHistory[taskInfo.metricsHistory.length - 1]?.progress || 0);
+      setTimeout(() => this.processStatus(taskId, nextStatus), 300);
     }
   }
 
-  private generateRealtimeMetrics(task: any, progress: number, status: TaskStatus): RealtimeMetrics {
-    const params = task.parameters;
-    
-    const baseAngle = 88 + (params.rf_power / 1000) * 2 - (params.pressure / 100) * 1;
-    const angleVariation = Math.sin(progress / 10) * 1.5;
-    const profileAngle = baseAngle + angleVariation + (Math.random() - 0.5) * 0.5;
+  private async completeTask(taskId: string) {
+    const taskInfo = this.runningTasks.get(taskId);
+    if (!taskInfo) return;
 
-    const baseSelectivity = 15 + (params.gas_ratio.CF4 / 50) * 5 + (params.bias_power / 500) * 3;
-    const selectivity = Math.max(5, baseSelectivity + (Math.random() - 0.5) * 2);
+    const totalElapsed = (Date.now() - taskInfo.startTime) / 1000;
+    const finalMetrics = physicsEngine.calculateAllMetrics(taskInfo.params, 100, totalElapsed);
 
-    const baseRate = 100 + (params.rf_power / 1000) * 50 + (params.pressure / 100) * 20;
-    const etchRate = baseRate + (Math.random() - 0.5) * 10;
+    const rateDistribution = physicsEngine.generateRateDistribution(taskInfo.params, 100);
+    const roughnessCurve = physicsEngine.generateRoughnessCurve(taskInfo.params, totalElapsed, 200);
+    const profileCoords = physicsEngine.generateProfileCoords(taskInfo.params, finalMetrics.etchDepth, 100);
 
-    const roughness = 1.5 + (100 - progress) / 50 + Math.random() * 0.5;
-
-    return {
-      timestamp: new Date(),
-      profileAngle: Number(profileAngle.toFixed(2)),
-      selectivity: Number(selectivity.toFixed(2)),
-      etchRate: Number(etchRate.toFixed(2)),
-      roughness: Number(roughness.toFixed(3)),
-      progress: Number(progress.toFixed(1))
-    };
-  }
-
-  private generateSimulationResult(params: ProcessParams): SimulationResult {
-    const points = 50;
-    const rate_distribution = Array.from({ length: points }, (_, i) => {
-      const center = points / 2;
-      const distance = Math.abs(i - center) / center;
-      const baseRate = 100 + (params.rf_power / 1000) * 50;
-      return baseRate * (1 - distance * 0.3) + (Math.random() - 0.5) * 10;
-    });
-
-    const roughness_curve = Array.from({ length: 200 }, (_, i) => {
-      return 1 + Math.sin(i / 10) * 0.3 + Math.sin(i / 3) * 0.1 + Math.random() * 0.2;
-    });
-
-    const profile_coords = Array.from({ length: 100 }, (_, i) => {
-      const x = i;
-      const depthFactor = i / 100;
-      const etchDepth = 500 + (params.rf_power / 1000) * 200;
-      const sidewallAngle = 88 + (params.rf_power / 1000) * 2;
-      const sidewallOffset = (depthFactor * etchDepth) / Math.tan(sidewallAngle * Math.PI / 180);
-      return { x, y: 50 - sidewallOffset + (Math.random() - 0.5) * 2 };
-    });
-
-    const time_series = Array.from({ length: 50 }, (_, i) => ({
-      time: i * 10,
-      angle: 88 + Math.sin(i / 5) * 1.5 + (Math.random() - 0.5) * 0.5,
-      selectivity: 15 + Math.sin(i / 8) * 2 + (Math.random() - 0.5),
-      rate: 100 + Math.sin(i / 6) * 10 + (Math.random() - 0.5) * 5
+    const timeSeries = taskInfo.metricsHistory.map((m, i) => ({
+      time: i * 5,
+      angle: m.profileAngle,
+      selectivity: m.selectivity,
+      rate: m.etchRate
     }));
 
-    return {
-      profile_angle: 89.5 + (params.rf_power / 1000) * 1.5,
-      selectivity: 16 + (params.gas_ratio.CF4 / 50) * 4,
-      uniformity: 95 + Math.random() * 4,
-      etch_depth: 520 + (params.rf_power / 1000) * 180,
-      etch_rate: 105 + (params.rf_power / 1000) * 45,
-      rate_distribution,
-      roughness_curve,
-      profile_coords,
-      time_series
+    const result: SimulationResult = {
+      profile_angle: finalMetrics.profileAngle,
+      selectivity: finalMetrics.selectivity,
+      uniformity: finalMetrics.uniformity,
+      etch_depth: finalMetrics.etchDepth,
+      etch_rate: finalMetrics.etchRate,
+      rate_distribution: rateDistribution,
+      roughness_curve: roughnessCurve,
+      profile_coords: profileCoords,
+      time_series: timeSeries
     };
+
+    db.run(
+      'UPDATE tasks SET status = ?, progress = ?, completed_at = ?, result = ?, realtime_metrics = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?',
+      ['completed', 100, new Date().toISOString(), JSON.stringify(result), JSON.stringify(taskInfo.metricsHistory), taskId]
+    );
+
+    this.notifyTaskUpdate(taskId, 'completed', 100);
+    this.notifyTaskCompleted(taskId, result);
+
+    this.stopTask(taskId);
+    await this.updateBatchAfterTaskCompletion(taskId);
+    await this.checkBatchNonuniformity(taskId);
   }
 
-  private async checkWarnings(task: any, metrics: RealtimeMetrics) {
-    const warnings = [];
-
+  private checkWarnings(taskId: string, task: any, metrics: RealtimeMetrics) {
     const targetAngle = 90;
     if (Math.abs(metrics.profileAngle - targetAngle) > 2) {
-      warnings.push({
-        type: 'angle_deviation' as const,
-        message: `刻蚀剖面角度偏差过大: ${metrics.profileAngle.toFixed(2)}°，目标角度: ${targetAngle}°`,
-        threshold: 2,
-        actualValue: Math.abs(metrics.profileAngle - targetAngle)
-      });
+      this.createWarning(taskId, 'angle_deviation',
+        `刻蚀剖面角度偏差过大: ${metrics.profileAngle.toFixed(2)}°，目标角度: ${targetAngle}°`,
+        2, Math.abs(metrics.profileAngle - targetAngle)
+      );
     }
 
     const minSelectivity = 10;
     if (metrics.selectivity < minSelectivity) {
-      warnings.push({
-        type: 'selectivity_low' as const,
-        message: `刻蚀选择性过低: ${metrics.selectivity.toFixed(2)}，最低阈值: ${minSelectivity}`,
-        threshold: minSelectivity,
-        actualValue: metrics.selectivity
-      });
-    }
-
-    for (const w of warnings) {
-      const existingWarning = db.findOne('warnings', (warn: any) => 
-        warn.taskId === task.id && warn.type === w.type && !warn.acknowledged
+      this.createWarning(taskId, 'selectivity_low',
+        `刻蚀选择性过低: ${metrics.selectivity.toFixed(2)}，最低阈值: ${minSelectivity}`,
+        minSelectivity, metrics.selectivity
       );
-
-      if (!existingWarning) {
-        const warning = db.create('warnings', {
-          id: uuidv4(),
-          taskId: task.id,
-          acknowledged: false,
-          createdAt: new Date(),
-          ...w
-        });
-        this.notifyWarning(warning);
-      }
     }
   }
 
-  private async updateBatchAfterTaskCompletion(task: any) {
-    const batch = db.findOne('batches', (b: any) => b.id === task.batchId);
-    if (batch) {
-      db.update('batches', (b: any) => b.id === task.batchId, {
-        completedCount: (batch.completedCount || 0) + 1
+  private createWarning(taskId: string, type: string, message: string, threshold: number, actualValue: number) {
+    const existing = db.get(
+      'SELECT * FROM warnings WHERE task_id = ? AND type = ? AND acknowledged = 0',
+      [taskId, type]
+    );
+
+    if (!existing) {
+      const id = uuidv4();
+      db.run(
+        'INSERT INTO warnings (id, task_id, type, message, threshold, actual_value, acknowledged, created_at) VALUES (?, ?, ?, ?, ?, ?, 0, CURRENT_TIMESTAMP)',
+        [id, taskId, type, message, threshold, actualValue]
+      );
+      this.notifyWarning({
+        id,
+        taskId,
+        type,
+        message,
+        threshold,
+        actualValue,
+        acknowledged: false,
+        createdAt: new Date()
       });
     }
   }
 
-  private async checkBatchNonuniformity(batchId: string) {
-    const batch = db.findOne('batches', (b: any) => b.id === batchId);
-    
-    if (!batch) return;
+  private async updateBatchAfterTaskCompletion(taskId: string) {
+    const task = db.get('SELECT * FROM tasks WHERE id = ?', [taskId]);
+    if (!task) return;
 
-    const tasks = db.find('tasks', (t: any) => t.batchId === batchId);
-    const completedTasks = tasks.filter(t => t.status === 'completed' && t.result);
+    const batch = db.get('SELECT * FROM batches WHERE id = ?', [task.batch_id]);
+    if (batch) {
+      db.run(
+        'UPDATE batches SET completed_count = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?',
+        [(batch.completed_count || 0) + 1, task.batch_id]
+      );
+    }
+  }
+
+  private async checkBatchNonuniformity(taskId: string) {
+    const task = db.get('SELECT * FROM tasks WHERE id = ?', [taskId]);
+    if (!task) return;
+
+    const tasks = db.all('SELECT * FROM tasks WHERE batch_id = ? AND status = ?', [task.batch_id, 'completed']);
+    const completedTasks = tasks.filter(t => t.result);
     if (completedTasks.length < 3) return;
 
     const recentTasks = completedTasks.slice(-3);
     const nonuniformCount = recentTasks.filter(t => {
-      if (!t.result) return false;
-      return t.result.uniformity < 95;
+      const result = typeof t.result === 'string' ? JSON.parse(t.result) : t.result;
+      return result && result.uniformity < 95;
     }).length;
 
-    const updates: any = { nonuniformCount };
+    const updates: any[] = [nonuniformCount];
+    let sql = 'UPDATE batches SET nonuniform_count = ?';
+    const params: any[] = [...updates];
 
     if (nonuniformCount >= 3) {
-      updates.status = 'paused';
-      updates.pauseReason = '连续三次模拟刻蚀不均匀度超过5%';
+      sql += ', status = ?, pause_reason = ?';
+      params.push('paused', '连续三次模拟刻蚀不均匀度超过5%');
     }
 
-    const updatedBatch = db.update('batches', (b: any) => b.id === batchId, updates);
-    
-    if (updatedBatch && nonuniformCount >= 3) {
-      this.notifyBatchPaused(updatedBatch);
+    sql += ', updated_at = CURRENT_TIMESTAMP WHERE id = ?';
+    params.push(task.batch_id);
+
+    db.run(sql, params);
+
+    if (nonuniformCount >= 3) {
+      const batch = db.get('SELECT * FROM batches WHERE id = ?', [task.batch_id]);
+      if (batch) {
+        this.notifyBatchPaused(batch);
+      }
     }
   }
 
-  async adjustParameters(taskId: string, newParams: Partial<ProcessParams>, reason: string, adjustedBy: string) {
-    const task = db.findOne('tasks', (t: any) => t.id === taskId);
+  async adjustParameters(taskId: string, newParams: Partial<ProcessParams>, reason: string, adjustedBy: string = 'system') {
+    const task = db.get('SELECT * FROM tasks WHERE id = ?', [taskId]);
     if (!task) throw new Error('Task not found');
+
+    const oldParams = typeof task.parameters === 'string' ? JSON.parse(task.parameters) : task.parameters;
+    const updatedParams = { ...oldParams, ...newParams };
+
+    db.run(
+      'INSERT INTO adjustments (id, task_id, before_params, after_params, reason, adjusted_by, created_at) VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)',
+      [uuidv4(), taskId, JSON.stringify(oldParams), JSON.stringify(updatedParams), reason, adjustedBy]
+    );
 
     this.stopTask(taskId);
 
-    const updatedTask = db.update('tasks', (t: any) => t.id === taskId, {
-      parameters: { ...task.parameters, ...newParams },
-      adjustCount: (task.adjustCount || 0) + 1,
-      status: 'model_building',
-      progress: 5,
-      realtimeMetrics: [],
-      result: undefined,
-      startedAt: new Date(),
-      completedAt: undefined
-    });
+    db.run(
+      'UPDATE tasks SET parameters = ?, adjust_count = ?, status = ?, progress = ?, realtime_metrics = ?, result = NULL, started_at = ?, completed_at = NULL, updated_at = CURRENT_TIMESTAMP WHERE id = ?',
+      [JSON.stringify(updatedParams), (task.adjust_count || 0) + 1, 'model_building', 5, JSON.stringify([]), new Date().toISOString(), taskId]
+    );
 
-    if (updatedTask) {
-      this.notifyTaskUpdate(updatedTask);
-    }
+    const taskInfo: RunningTaskInfo = {
+      intervals: [],
+      startTime: Date.now(),
+      metricsHistory: [],
+      currentStatus: 'model_building',
+      params: updatedParams
+    };
+    this.runningTasks.set(taskId, taskInfo);
 
-    setTimeout(() => this.processNextStatus(taskId), 500);
+    this.notifyTaskUpdate(taskId, 'model_building', 5);
+    setTimeout(() => this.processStatus(taskId, 'model_building'), 500);
 
-    return updatedTask;
+    return db.get('SELECT * FROM tasks WHERE id = ?', [taskId]);
   }
 
   stopTask(taskId: string) {
-    const timeouts = this.runningTasks.get(taskId);
-    if (timeouts) {
-      timeouts.forEach(t => clearInterval(t));
+    const taskInfo = this.runningTasks.get(taskId);
+    if (taskInfo) {
+      taskInfo.intervals.forEach(t => clearInterval(t));
       this.runningTasks.delete(taskId);
     }
   }
 
-  private addTaskTimeout(taskId: string, timeout: NodeJS.Timeout) {
-    const timeouts = this.runningTasks.get(taskId) || [];
-    timeouts.push(timeout);
-    this.runningTasks.set(taskId, timeouts);
-  }
-
-  private notifyTaskUpdate(task: any) {
+  private notifyTaskUpdate(taskId: string, status: string, progress: number) {
     if (this.io) {
-      this.io.emit('task:update', {
-        taskId: task.id,
-        status: task.status,
-        progress: task.progress
-      });
+      this.io.emit('task:update', { taskId, status, progress });
     }
   }
 
@@ -348,6 +414,12 @@ class SimulationEngine {
   private notifyBatchPaused(batch: any) {
     if (this.io) {
       this.io.emit('batch:paused', batch);
+    }
+  }
+
+  private notifyTaskCompleted(taskId: string, result: SimulationResult) {
+    if (this.io) {
+      this.io.emit(`task:${taskId}:completed`, result);
     }
   }
 }

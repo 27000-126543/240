@@ -170,26 +170,33 @@ class SQLiteDatabase {
     }
   }
 
+  private sanitizeParams(params: any[]): any[] {
+    return params.map(p => p === undefined ? null : p);
+  }
+
   run(sql: string, params: any[] = []) {
     if (!this.db) throw new Error('Database not initialized');
+    const safeParams = this.sanitizeParams(params);
     const stmt = this.db.prepare(sql);
-    stmt.run(params);
+    stmt.run(safeParams);
     stmt.free();
     this.persist();
   }
 
   get<T = any>(sql: string, params: any[] = []): T | undefined {
     if (!this.db) throw new Error('Database not initialized');
+    const safeParams = this.sanitizeParams(params);
     const stmt = this.db.prepare(sql);
-    const result = stmt.getAsObject(params) as T;
+    const result = stmt.getAsObject(safeParams) as T;
     stmt.free();
     return result;
   }
 
   all<T = any>(sql: string, params: any[] = []): T[] {
     if (!this.db) throw new Error('Database not initialized');
+    const safeParams = this.sanitizeParams(params);
     const stmt = this.db.prepare(sql);
-    stmt.bind(params);
+    stmt.bind(safeParams);
     const results: T[] = [];
     while (stmt.step()) {
       results.push(stmt.getAsObject() as T);

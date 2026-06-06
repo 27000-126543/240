@@ -1,17 +1,20 @@
 import { Router, Request, Response } from 'express';
 import { v4 as uuidv4 } from 'uuid';
-import { db } from '../db/database';
+import { db } from '../db/sqlite';
 
 const router = Router();
 
 router.get('/', async (req: Request, res: Response) => {
   try {
-    let batches = db.getAll('batches');
-    batches.sort((a: any, b: any) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+    const batches = db.all('SELECT * FROM batches ORDER BY created_at DESC');
 
     const batchesWithTasks = batches.map((batch: any) => ({
       ...batch,
-      tasks: db.find('tasks', (t: any) => t.batchId === batch.id)
+      tasks: db.all('SELECT * FROM tasks WHERE batch_id = ?', [batch.id]).map((task: any) => ({
+        ...task,
+        parameters: task.parameters ? JSON.parse(task.parameters) : null,
+        result: task.result ? JSON.parse(task.result) : null
+      }))
     }));
 
     res.json(batchesWithTasks);
@@ -22,7 +25,7 @@ router.get('/', async (req: Request, res: Response) => {
 
 router.get('/:batchId', async (req: Request, res: Response) => {
   try {
-    const batch = db.findOne('batches', (b: any) => b.id === req.params.batchId);
+    const batch = db.get('SELECT * FROM batches WHERE id = ?', [req.params.batchId]);
 
     if (!batch) {
       return res.status(404).json({ error: '批次不存在' });
@@ -30,7 +33,11 @@ router.get('/:batchId', async (req: Request, res: Response) => {
 
     const batchWithTasks = {
       ...batch,
-      tasks: db.find('tasks', (t: any) => t.batchId === batch.id)
+      tasks: db.all('SELECT * FROM tasks WHERE batch_id = ?', [batch.id]).map((task: any) => ({
+        ...task,
+        parameters: task.parameters ? JSON.parse(task.parameters) : null,
+        result: task.result ? JSON.parse(task.result) : null
+      }))
     };
 
     res.json(batchWithTasks);
@@ -41,13 +48,14 @@ router.get('/:batchId', async (req: Request, res: Response) => {
 
 router.get('/:batchId/tasks', async (req: Request, res: Response) => {
   try {
-    let tasks = db.find('tasks', (t: any) => t.batchId === req.params.batchId);
-    tasks.sort((a: any, b: any) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+    const tasks = db.all('SELECT * FROM tasks WHERE batch_id = ? ORDER BY created_at DESC', [req.params.batchId]);
 
     const tasksWithRelations = tasks.map((task: any) => ({
       ...task,
-      warnings: db.find('warnings', (w: any) => w.taskId === task.id),
-      approvals: db.find('approvals', (a: any) => a.taskId === task.id)
+      parameters: task.parameters ? JSON.parse(task.parameters) : null,
+      result: task.result ? JSON.parse(task.result) : null,
+      warnings: db.all('SELECT * FROM warnings WHERE task_id = ?', [task.id]),
+      approvals: db.all('SELECT * FROM approvals WHERE task_id = ?', [task.id])
     }));
 
     res.json(tasksWithRelations);
@@ -60,15 +68,13 @@ router.post('/', async (req: Request, res: Response) => {
   try {
     const { name } = req.body;
 
-    const batch = db.create('batches', {
-      id: uuidv4(),
-      name: name || `批次-${new Date().toLocaleDateString()}`,
-      status: 'active',
-      nonuniformCount: 0,
-      taskCount: 0,
-      completedCount: 0,
-      createdAt: new Date()
-    });
+    const batchId = uuidv4();
+    db.run(`
+      INSERT INTO batches (id, name, status, nonuniform_count, task_count, completed_count, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+    `, [batchId, name || `批次-${new Date().toLocaleDateString()}`, 'active', 0, 0, 0]);
+
+    const batch = db.get('SELECT * FROM batches WHERE id = ?', [batchId]);
 
     res.status(201).json(batch);
   } catch (error) {
@@ -79,16 +85,19 @@ router.post('/', async (req: Request, res: Response) => {
 router.put('/:batchId/pause', async (req: Request, res: Response) => {
   try {
     const { reason } = req.body;
-    const batch = db.findOne('batches', (b: any) => b.id === req.params.batchId);
+    const batch = db.get('SELECT * FROM batches WHERE id = ?', [req.params.batchId]);
 
     if (!batch) {
       return res.status(404).json({ error: '批次不存在' });
     }
 
-    const updatedBatch = db.update('batches', (b: any) => b.id === req.params.batchId, {
-      status: 'paused',
-      pauseReason: reason || '手动暂停'
-    });
+    db.run(`
+      UPDATE batches 
+      SET status = ?, pause_reason = ?
+      WHERE id = ?
+    `, ['paused', reason || '手动暂停', req.params.batchId]);
+
+    const updatedBatch = db.get('SELECT * FROM batches WHERE id = ?', [req.params.batchId]);
 
     res.json({ message: '批次已暂停', batch: updatedBatch });
   } catch (error) {
@@ -98,17 +107,19 @@ router.put('/:batchId/pause', async (req: Request, res: Response) => {
 
 router.put('/:batchId/resume', async (req: Request, res: Response) => {
   try {
-    const batch = db.findOne('batches', (b: any) => b.id === req.params.batchId);
+    const batch = db.get('SELECT * FROM batches WHERE id = ?', [req.params.batchId]);
 
     if (!batch) {
       return res.status(404).json({ error: '批次不存在' });
     }
 
-    const updatedBatch = db.update('batches', (b: any) => b.id === req.params.batchId, {
-      status: 'active',
-      pauseReason: null,
-      nonuniformCount: 0
-    });
+    db.run(`
+      UPDATE batches 
+      SET status = ?, pause_reason = ?, nonuniform_count = 0
+      WHERE id = ?
+    `, ['active', null, req.params.batchId]);
+
+    const updatedBatch = db.get('SELECT * FROM batches WHERE id = ?', [req.params.batchId]);
 
     res.json({ message: '批次已恢复', batch: updatedBatch });
   } catch (error) {

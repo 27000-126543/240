@@ -1,7 +1,7 @@
 import { Router, Request, Response } from 'express';
 import { v4 as uuidv4 } from 'uuid';
 import dayjs from 'dayjs';
-import { db } from '../db/database';
+import { db } from '../db/sqlite';
 
 const router = Router();
 
@@ -9,27 +9,33 @@ router.get('/stats', async (req: Request, res: Response) => {
   try {
     const today = dayjs().format('YYYY-MM-DD');
     
-    let dailyStats = db.findOne('dailyStats', (d: any) => d.date === today);
+    let dailyStats = db.get('SELECT * FROM daily_stats WHERE date = ?', [today]);
     
     if (!dailyStats) {
       dailyStats = await generateDailyStats(today);
     }
 
     const activeStatuses = ['model_building', 'plasma_calculation', 'rate_analysis', 'profile_evolution'];
-    const activeTasks = db.count('tasks', (t: any) => activeStatuses.includes(t.status));
+    const placeholders = activeStatuses.map(() => '?').join(',');
+    const activeTasks = db.count(
+      `SELECT COUNT(*) as count FROM tasks WHERE status IN (${placeholders})`,
+      activeStatuses
+    );
 
-    const allWarnings = db.getAll('warnings');
-    const warningsToday = allWarnings.filter((w: any) => {
-      const warningDate = dayjs(w.createdAt).format('YYYY-MM-DD');
-      return warningDate === today;
-    }).length;
+    const warningsToday = db.count(
+      'SELECT COUNT(*) as count FROM warnings WHERE DATE(created_at) = ?',
+      [today]
+    );
 
-    const approvalsPending = db.count('approvals', (a: any) => a.status === 'pending');
+    const approvalsPending = db.count(
+      "SELECT COUNT(*) as count FROM approvals WHERE status = 'pending'",
+      []
+    );
 
     res.json({
-      completionRate: dailyStats.completionRate,
-      rateDeviation: dailyStats.rateDeviation,
-      optimizationCount: dailyStats.optimizationCount,
+      completionRate: dailyStats.completion_rate,
+      rateDeviation: dailyStats.rate_deviation,
+      optimizationCount: dailyStats.optimization_count,
       activeTasks,
       warningsToday,
       approvalsPending
@@ -43,13 +49,13 @@ router.get('/stats', async (req: Request, res: Response) => {
 router.get('/process-capability', async (req: Request, res: Response) => {
   try {
     const today = dayjs().format('YYYY-MM-DD');
-    let dailyStats = db.findOne('dailyStats', (d: any) => d.date === today);
+    let dailyStats = db.get('SELECT * FROM daily_stats WHERE date = ?', [today]);
     
-    if (!dailyStats || !dailyStats.processCapability) {
+    if (!dailyStats || !dailyStats.process_capability) {
       dailyStats = await generateDailyStats(today);
     }
 
-    res.json(dailyStats.processCapability || getDefaultProcessCapability());
+    res.json(dailyStats.process_capability ? JSON.parse(dailyStats.process_capability) : getDefaultProcessCapability());
   } catch (error) {
     res.status(500).json({ error: '获取工艺能力指数失败' });
   }
@@ -57,14 +63,12 @@ router.get('/process-capability', async (req: Request, res: Response) => {
 
 router.get('/weekly-trends', async (req: Request, res: Response) => {
   try {
-    let tasks = db.getAll('tasks');
-    tasks.sort((a: any, b: any) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
-    tasks = tasks.slice(0, 100);
+    const tasks = db.all('SELECT * FROM tasks ORDER BY created_at DESC LIMIT 100');
 
     const dailyData: Record<string, { completed: number; total: number }> = {};
     
     tasks.forEach((task: any) => {
-      const date = dayjs(task.createdAt).format('MM-DD');
+      const date = dayjs(task.created_at).format('MM-DD');
       if (!dailyData[date]) {
         dailyData[date] = { completed: 0, total: 0 };
       }
@@ -90,13 +94,18 @@ router.get('/weekly-trends', async (req: Request, res: Response) => {
 router.get('/active-tasks', async (req: Request, res: Response) => {
   try {
     const activeStatuses = ['model_building', 'plasma_calculation', 'rate_analysis', 'profile_evolution'];
-    let activeTasks = db.find('tasks', (t: any) => activeStatuses.includes(t.status));
-    activeTasks.sort((a: any, b: any) => new Date(b.updatedAt || b.createdAt).getTime() - new Date(a.updatedAt || a.createdAt).getTime());
-    activeTasks = activeTasks.slice(0, 10);
+    const placeholders = activeStatuses.map(() => '?').join(',');
+    
+    let activeTasks = db.all(
+      `SELECT * FROM tasks WHERE status IN (${placeholders}) ORDER BY COALESCE(updated_at, created_at) DESC LIMIT 10`,
+      activeStatuses
+    );
 
     const activeTasksWithWarnings = activeTasks.map((task: any) => ({
       ...task,
-      warnings: db.find('warnings', (w: any) => w.taskId === task.id)
+      parameters: task.parameters ? JSON.parse(task.parameters) : null,
+      result: task.result ? JSON.parse(task.result) : null,
+      warnings: db.all('SELECT * FROM warnings WHERE task_id = ?', [task.id])
     }));
 
     res.json(activeTasksWithWarnings);
@@ -107,13 +116,12 @@ router.get('/active-tasks', async (req: Request, res: Response) => {
 
 router.get('/recent-warnings', async (req: Request, res: Response) => {
   try {
-    let warnings = db.getAll('warnings');
-    warnings.sort((a: any, b: any) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
-    warnings = warnings.slice(0, 10);
+    const warnings = db.all('SELECT * FROM warnings ORDER BY created_at DESC LIMIT 10');
 
     const warningsWithTask = warnings.map((warning: any) => ({
       ...warning,
-      task: db.findOne('tasks', (t: any) => t.id === warning.taskId)
+      acknowledged: warning.acknowledged === 1,
+      task: db.get('SELECT * FROM tasks WHERE id = ?', [warning.task_id])
     }));
 
     res.json(warningsWithTask);
@@ -123,8 +131,13 @@ router.get('/recent-warnings', async (req: Request, res: Response) => {
 });
 
 async function generateDailyStats(date: string): Promise<any> {
-  const allTasks = db.getAll('tasks');
-  const completedTasks = allTasks.filter((t: any) => t.status === 'completed');
+  const allTasks = db.all('SELECT * FROM tasks');
+  const parsedTasks = allTasks.map((t: any) => ({
+    ...t,
+    result: t.result ? JSON.parse(t.result) : null
+  }));
+
+  const completedTasks = parsedTasks.filter((t: any) => t.status === 'completed');
   
   const completionRate = allTasks.length > 0 
     ? (completedTasks.length / allTasks.length) * 100 
@@ -139,21 +152,29 @@ async function generateDailyStats(date: string): Promise<any> {
       }, 0) / completedTasks.length
     : 0;
 
-  const optimizationCount = db.count('tasks', (t: any) => (t.adjustCount || 0) > 0);
+  const optimizationCount = db.count(
+    'SELECT COUNT(*) as count FROM tasks WHERE adjust_count > 0',
+    []
+  );
 
-  const dailyStats = db.create('dailyStats', {
-    id: uuidv4(),
+  const dailyStatsId = uuidv4();
+  db.run(`
+    INSERT INTO daily_stats (id, date, completion_rate, rate_deviation, optimization_count, total_tasks, completed_tasks, warning_count, approval_count, process_capability, created_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+  `, [
+    dailyStatsId,
     date,
-    completionRate: Number(completionRate.toFixed(1)),
-    rateDeviation: Number(rateDeviation.toFixed(2)),
+    Number(completionRate.toFixed(1)),
+    Number(rateDeviation.toFixed(2)),
     optimizationCount,
-    totalTasks: allTasks.length,
-    completedTasks: completedTasks.length,
-    processCapability: getDefaultProcessCapability(),
-    createdAt: new Date()
-  });
+    allTasks.length,
+    completedTasks.length,
+    0,
+    0,
+    JSON.stringify(getDefaultProcessCapability())
+  ]);
 
-  return dailyStats;
+  return db.get('SELECT * FROM daily_stats WHERE id = ?', [dailyStatsId]);
 }
 
 function getDefaultProcessCapability() {
