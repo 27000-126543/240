@@ -37,9 +37,15 @@ class SQLiteDatabase {
         task_count INTEGER DEFAULT 0,
         completed_count INTEGER DEFAULT 0,
         pause_reason TEXT,
-        created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
       )
     `);
+
+    try {
+      this.db.run(`ALTER TABLE batches ADD COLUMN updated_at DATETIME DEFAULT CURRENT_TIMESTAMP`);
+    } catch (e) {
+    }
 
     this.db.run(`
       CREATE TABLE IF NOT EXISTS tasks (

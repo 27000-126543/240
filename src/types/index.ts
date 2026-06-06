@@ -52,6 +52,8 @@ export interface Warning {
   threshold: number;
   actualValue: number;
   acknowledged: boolean;
+  acknowledgedBy?: string;
+  ackComment?: string;
   createdAt: Date;
 }
 
@@ -61,6 +63,7 @@ export interface ParamAdjustment {
   beforeParams: ProcessParams;
   afterParams: ProcessParams;
   reason: string;
+  adjustedBy: string;
   createdAt: Date;
 }
 
@@ -72,13 +75,14 @@ export interface ApprovalRecord {
   status: ApprovalStatus;
   comment: string;
   createdAt: Date;
+  decidedAt?: Date;
 }
 
 export interface Task {
   id: string;
   batchId: string;
   name: string;
-  maskFile: string;
+  maskFile?: string;
   status: TaskStatus;
   progress: number;
   parameters: ProcessParams;
@@ -90,6 +94,8 @@ export interface Task {
   createdAt: Date;
   startedAt?: Date;
   completedAt?: Date;
+  updatedAt?: Date;
+  realtimeMetrics?: any[];
 }
 
 export interface Batch {
@@ -98,6 +104,9 @@ export interface Batch {
   status: BatchStatus;
   nonuniformCount: number;
   taskCount: number;
+  completedCount?: number;
+  pauseReason?: string;
+  tasks?: Task[];
   createdAt: Date;
 }
 

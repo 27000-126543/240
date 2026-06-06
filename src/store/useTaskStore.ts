@@ -2,6 +2,70 @@ import { create } from 'zustand';
 import type { Task, TaskStatus, ProcessParams, Warning, ParamAdjustment, ApprovalRecord, Batch } from '@/types';
 import { api } from '@/services/api';
 
+function convertTaskFromApi(t: any): Task {
+  return {
+    id: t.id,
+    batchId: t.batch_id || t.batchId,
+    name: t.name,
+    maskFile: t.mask_file || t.maskFile,
+    status: t.status,
+    progress: t.progress,
+    parameters: typeof t.parameters === 'string' ? JSON.parse(t.parameters) : t.parameters,
+    result: t.result ? (typeof t.result === 'string' ? JSON.parse(t.result) : t.result) : undefined,
+    realtimeMetrics: t.realtime_metrics || t.realtimeMetrics,
+    warnings: (t.warnings || []).map((w: any) => ({
+      id: w.id,
+      taskId: w.task_id || w.taskId,
+      type: w.type,
+      message: w.message,
+      threshold: w.threshold,
+      actualValue: w.actual_value || w.actualValue,
+      acknowledged: Boolean(w.acknowledged),
+      acknowledgedBy: w.acknowledged_by || w.acknowledgedBy,
+      ackComment: w.ack_comment || w.ackComment,
+      createdAt: new Date(w.created_at || w.createdAt)
+    })),
+    adjustments: (t.adjustments || []).map((a: any) => ({
+      id: a.id,
+      taskId: a.task_id || a.taskId,
+      beforeParams: typeof a.before_params === 'string' ? JSON.parse(a.before_params) : a.beforeParams || a.before_params,
+      afterParams: typeof a.after_params === 'string' ? JSON.parse(a.after_params) : a.afterParams || a.after_params,
+      reason: a.reason,
+      adjustedBy: a.adjusted_by || a.adjustedBy,
+      createdAt: new Date(a.created_at || a.createdAt)
+    })),
+    approvals: (t.approvals || []).map((a: any) => ({
+      id: a.id,
+      taskId: a.task_id || a.taskId,
+      level: a.level,
+      approver: a.approver,
+      status: a.status,
+      comment: a.comment,
+      createdAt: new Date(a.created_at || a.createdAt),
+      decidedAt: a.decided_at || a.decidedAt ? new Date(a.decided_at || a.decidedAt) : undefined
+    })),
+    adjustCount: t.adjust_count || t.adjustCount || 0,
+    createdAt: new Date(t.created_at || t.createdAt),
+    startedAt: t.started_at || t.startedAt ? new Date(t.started_at || t.startedAt) : undefined,
+    completedAt: t.completed_at || t.completedAt ? new Date(t.completed_at || t.completedAt) : undefined,
+    updatedAt: t.updated_at || t.updatedAt ? new Date(t.updated_at || t.updatedAt) : undefined,
+  };
+}
+
+function convertBatchFromApi(b: any): Batch {
+  return {
+    id: b.id,
+    name: b.name,
+    status: b.status,
+    nonuniformCount: b.nonuniform_count || b.nonuniformCount || 0,
+    taskCount: b.task_count || b.taskCount || 0,
+    completedCount: b.completed_count || b.completedCount || 0,
+    pauseReason: b.pause_reason || b.pauseReason,
+    tasks: (b.tasks || []).map((t: any) => convertTaskFromApi(t)),
+    createdAt: new Date(b.created_at || b.createdAt)
+  };
+}
+
 interface TaskStore {
   tasks: Task[];
   batches: Batch[];
@@ -48,16 +112,8 @@ export const useTaskStore = create<TaskStore>((set, get) => ({
     set({ loading: true, error: null });
     try {
       const data = await api.tasks.list(params) as any;
-      const tasks = Array.isArray(data) ? data : data.tasks || [];
-      set({ tasks: tasks.map((t: any) => ({
-        ...t,
-        createdAt: new Date(t.createdAt),
-        startedAt: t.startedAt ? new Date(t.startedAt) : undefined,
-        completedAt: t.completedAt ? new Date(t.completedAt) : undefined,
-        warnings: t.warnings?.map((w: any) => ({ ...w, createdAt: new Date(w.createdAt) })) || [],
-        adjustments: t.adjustments?.map((a: any) => ({ ...a, createdAt: new Date(a.createdAt) })) || [],
-        approvals: t.approvals?.map((a: any) => ({ ...a, createdAt: new Date(a.createdAt) })) || [],
-      })) });
+      const tasksData = Array.isArray(data) ? data : data.data || data.tasks || [];
+      set({ tasks: tasksData.map((t: any) => convertTaskFromApi(t)) });
     } catch (error: any) {
       set({ error: error.message });
     } finally {
@@ -69,15 +125,7 @@ export const useTaskStore = create<TaskStore>((set, get) => ({
     set({ loading: true, error: null });
     try {
       const t = await api.tasks.get(taskId) as any;
-      const task = {
-        ...t,
-        createdAt: new Date(t.createdAt),
-        startedAt: t.startedAt ? new Date(t.startedAt) : undefined,
-        completedAt: t.completedAt ? new Date(t.completedAt) : undefined,
-        warnings: t.warnings?.map((w: any) => ({ ...w, createdAt: new Date(w.createdAt) })) || [],
-        adjustments: t.adjustments?.map((a: any) => ({ ...a, createdAt: new Date(a.createdAt) })) || [],
-        approvals: t.approvals?.map((a: any) => ({ ...a, createdAt: new Date(a.createdAt) })) || [],
-      };
+      const task = convertTaskFromApi(t);
       set(state => ({
         tasks: state.tasks.map(t => t.id === taskId ? task : t),
       }));
@@ -92,13 +140,7 @@ export const useTaskStore = create<TaskStore>((set, get) => ({
     set({ loading: true, error: null });
     try {
       const newTask = await api.tasks.create(data) as any;
-      const task = {
-        ...newTask,
-        createdAt: new Date(newTask.createdAt),
-        warnings: [],
-        adjustments: [],
-        approvals: [],
-      };
+      const task = convertTaskFromApi(newTask);
       set(state => ({ tasks: [task, ...state.tasks] }));
       return task;
     } catch (error: any) {
@@ -255,11 +297,8 @@ export const useTaskStore = create<TaskStore>((set, get) => ({
     set({ loading: true, error: null });
     try {
       const data = await api.batches.list() as any;
-      const batches = Array.isArray(data) ? data : data.batches || [];
-      set({ batches: batches.map((b: any) => ({
-        ...b,
-        createdAt: new Date(b.createdAt),
-      })) });
+      const batchesData = Array.isArray(data) ? data : data.batches || [];
+      set({ batches: batchesData.map((b: any) => convertBatchFromApi(b)) });
     } catch (error: any) {
       set({ error: error.message });
     } finally {

@@ -87,33 +87,33 @@ class ReportGenerator {
 
     doc.fillColor('#ffffff')
        .fontSize(28)
-       .font('Helvetica-Bold');
-    doc.y = 60;
-    doc.text('等离子体刻蚀工艺模拟报告', {
-      align: 'center'
-    });
+       .font('Helvetica-Bold')
+       .text('等离子体刻蚀工艺模拟报告', this.MARGIN, 60, {
+         align: 'center',
+         width: this.CONTENT_WIDTH
+       });
 
     doc.fontSize(16)
-       .font('Helvetica');
-    doc.y = 100;
-    doc.text('Plasma Etching Process Simulation Report', {
-      align: 'center'
-    });
+       .font('Helvetica')
+       .text('Plasma Etching Process Simulation Report', this.MARGIN, 100, {
+         align: 'center',
+         width: this.CONTENT_WIDTH
+       });
 
     doc.fillColor('#ffffff')
-       .fontSize(12);
-    doc.y = this.PAGE_HEIGHT - 70;
-    doc.text('报告生成时间: ' + new Date().toLocaleString('zh-CN'), {
-      align: 'center'
-    });
+       .fontSize(12)
+       .text('报告生成时间: ' + new Date().toLocaleString('zh-CN'), this.MARGIN, this.PAGE_HEIGHT - 70, {
+         align: 'center',
+         width: this.CONTENT_WIDTH
+       });
 
     doc.fillColor('#1a202c')
        .fontSize(22)
-       .font('Helvetica-Bold');
-    doc.y = centerY - 80;
-    doc.text(data.task.name, {
-      align: 'center'
-    });
+       .font('Helvetica-Bold')
+       .text(data.task.name, this.MARGIN, centerY - 80, {
+         align: 'center',
+         width: this.CONTENT_WIDTH
+       });
 
     const tableY = centerY - 20;
     const col1X = centerX - 150;

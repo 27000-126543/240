@@ -43,6 +43,7 @@ export default function TaskDetail() {
   const { getTaskById, fetchTask, updateTaskStatus, updateTaskProgress, startTask, loading, error } = useTaskStore();
   const [activeTab, setActiveTab] = useState<'overview' | 'monitoring' | 'parameters' | 'history'>('overview');
   const [isSimulating, setIsSimulating] = useState(false);
+  const [realtimeMetrics, setRealtimeMetrics] = useState<any[]>([]);
   
   const task = getTaskById(id || '');
   
@@ -56,6 +57,12 @@ export default function TaskDetail() {
     }
   }, [id, updateTaskStatus, updateTaskProgress]);
 
+  const handleMetrics = useCallback((data: any) => {
+    if (data.taskId === id) {
+      setRealtimeMetrics(prev => [...prev.slice(-50), data]);
+    }
+  }, [id]);
+
   useEffect(() => {
     if (id) {
       fetchTask(id);
@@ -63,11 +70,13 @@ export default function TaskDetail() {
 
     socketService.connect();
     socketService.onTaskUpdate(handleTaskUpdate);
+    socketService.onTaskMetrics(id || '', handleMetrics);
 
     return () => {
       socketService.offTaskUpdate(handleTaskUpdate);
+      socketService.offTaskMetrics(id || '', handleMetrics);
     };
-  }, [id, fetchTask, handleTaskUpdate]);
+  }, [id, fetchTask, handleTaskUpdate, handleMetrics]);
 
   if (loading && !task) {
     return (
@@ -390,80 +399,134 @@ export default function TaskDetail() {
         </div>
       )}
 
-      {activeTab === 'monitoring' && task.result && (
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-          <div className="glass-panel rounded-xl p-6">
-            <h3 className="font-display font-semibold text-white mb-4">刻蚀剖面角度监控</h3>
-            <div className="h-64">
-              <ResponsiveContainer width="100%" height="100%">
-                <LineChart data={task.result.time_series}>
-                  <CartesianGrid strokeDasharray="3 3" stroke="rgba(14, 165, 233, 0.1)" />
-                  <XAxis dataKey="time" tick={{ fill: '#94a3b8', fontSize: 12 }} label={{ value: '时间 (s)', fill: '#64748b', fontSize: 11, position: 'insideBottom', offset: -5 }} />
-                  <YAxis domain={[80, 95]} tick={{ fill: '#94a3b8', fontSize: 12 }} />
-                  <Tooltip contentStyle={{ backgroundColor: '#0F172A', border: '1px solid rgba(14, 165, 233, 0.3)', borderRadius: '8px', color: '#fff' }} />
-                  <Line type="monotone" dataKey="angle" stroke="#0EA5E9" strokeWidth={2} dot={false} name="角度 (°)" />
-                  <Line type="monotone" dataKey={() => 90} stroke="#F97316" strokeWidth={1} strokeDasharray="5,5" name="目标值" />
-                  <Line type="monotone" dataKey={() => 88} stroke="#F97316" strokeWidth={1} strokeDasharray="3,3" name="下限" />
-                </LineChart>
-              </ResponsiveContainer>
+      {activeTab === 'monitoring' && (
+        <div className="space-y-6">
+          {task.status !== 'completed' && task.status !== 'error' && task.status !== 'pending' && (
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
+              <div className="glass-panel rounded-xl p-5">
+                <p className="text-sm text-gray-400 font-medium mb-2">剖面角度</p>
+                <div className="flex items-baseline gap-1">
+                  <span className="text-3xl font-display font-bold text-tech-300">
+                    {realtimeMetrics.length > 0 ? realtimeMetrics[realtimeMetrics.length - 1]?.profileAngle?.toFixed(1) : '--'}
+                  </span>
+                  <span className="text-sm text-gray-400">°</span>
+                </div>
+              </div>
+              <div className="glass-panel rounded-xl p-5">
+                <p className="text-sm text-gray-400 font-medium mb-2">选择性</p>
+                <div className="flex items-baseline gap-1">
+                  <span className="text-3xl font-display font-bold text-green-400">
+                    {realtimeMetrics.length > 0 ? realtimeMetrics[realtimeMetrics.length - 1]?.selectivity?.toFixed(1) : '--'}
+                  </span>
+                  <span className="text-sm text-gray-400">:1</span>
+                </div>
+              </div>
+              <div className="glass-panel rounded-xl p-5">
+                <p className="text-sm text-gray-400 font-medium mb-2">刻蚀速率</p>
+                <div className="flex items-baseline gap-1">
+                  <span className="text-3xl font-display font-bold text-cyan-400">
+                    {realtimeMetrics.length > 0 ? realtimeMetrics[realtimeMetrics.length - 1]?.etchRate?.toFixed(0) : '--'}
+                  </span>
+                  <span className="text-sm text-gray-400">nm/min</span>
+                </div>
+              </div>
+              <div className="glass-panel rounded-xl p-5">
+                <p className="text-sm text-gray-400 font-medium mb-2">表面粗糙度</p>
+                <div className="flex items-baseline gap-1">
+                  <span className="text-3xl font-display font-bold text-plasma-purple">
+                    {realtimeMetrics.length > 0 ? realtimeMetrics[realtimeMetrics.length - 1]?.roughness?.toFixed(2) : '--'}
+                  </span>
+                  <span className="text-sm text-gray-400">nm</span>
+                </div>
+              </div>
             </div>
-          </div>
+          )}
 
-          <div className="glass-panel rounded-xl p-6">
-            <h3 className="font-display font-semibold text-white mb-4">选择性监控</h3>
-            <div className="h-64">
-              <ResponsiveContainer width="100%" height="100%">
-                <AreaChart data={task.result.time_series}>
-                  <defs>
-                    <linearGradient id="selectivityGrad" x1="0" y1="0" x2="0" y2="1">
-                      <stop offset="5%" stopColor="#10B981" stopOpacity={0.3} />
-                      <stop offset="95%" stopColor="#10B981" stopOpacity={0} />
-                    </linearGradient>
-                  </defs>
-                  <CartesianGrid strokeDasharray="3 3" stroke="rgba(14, 165, 233, 0.1)" />
-                  <XAxis dataKey="time" tick={{ fill: '#94a3b8', fontSize: 12 }} />
-                  <YAxis domain={[0, 20]} tick={{ fill: '#94a3b8', fontSize: 12 }} />
-                  <Tooltip contentStyle={{ backgroundColor: '#0F172A', border: '1px solid rgba(14, 165, 233, 0.3)', borderRadius: '8px', color: '#fff' }} />
-                  <Area type="monotone" dataKey="selectivity" stroke="#10B981" strokeWidth={2} fill="url(#selectivityGrad)" name="选择性" />
-                  <Line type="monotone" dataKey={() => 10} stroke="#F97316" strokeWidth={1} strokeDasharray="5,5" name="阈值" />
-                </AreaChart>
-              </ResponsiveContainer>
-            </div>
-          </div>
+          {task.result ? (
+            <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+              <div className="glass-panel rounded-xl p-6">
+                <h3 className="font-display font-semibold text-white mb-4">刻蚀剖面角度监控</h3>
+                <div className="h-64">
+                  <ResponsiveContainer width="100%" height="100%">
+                    <LineChart data={task.result?.time_series || realtimeMetrics.map((m, i) => ({ time: i, angle: m.profileAngle, selectivity: m.selectivity, rate: m.etchRate }))}>
+                      <CartesianGrid strokeDasharray="3 3" stroke="rgba(14, 165, 233, 0.1)" />
+                      <XAxis dataKey="time" tick={{ fill: '#94a3b8', fontSize: 12 }} label={{ value: '时间 (s)', fill: '#64748b', fontSize: 11, position: 'insideBottom', offset: -5 }} />
+                      <YAxis domain={[80, 95]} tick={{ fill: '#94a3b8', fontSize: 12 }} />
+                      <Tooltip contentStyle={{ backgroundColor: '#0F172A', border: '1px solid rgba(14, 165, 233, 0.3)', borderRadius: '8px', color: '#fff' }} />
+                      <Line type="monotone" dataKey="angle" stroke="#0EA5E9" strokeWidth={2} dot={false} name="角度 (°)" />
+                      <Line type="monotone" dataKey={() => 90} stroke="#F97316" strokeWidth={1} strokeDasharray="5,5" name="目标值" />
+                      <Line type="monotone" dataKey={() => 88} stroke="#F97316" strokeWidth={1} strokeDasharray="3,3" name="下限" />
+                    </LineChart>
+                  </ResponsiveContainer>
+                </div>
+              </div>
 
-          <div className="glass-panel rounded-xl p-6">
-            <h3 className="font-display font-semibold text-white mb-4">刻蚀速率分布</h3>
-            <div className="h-64">
-              <ResponsiveContainer width="100%" height="100%">
-                <BarChart data={task.result.rate_distribution.map((v, i) => ({ pos: i, rate: v }))}>
-                  <CartesianGrid strokeDasharray="3 3" stroke="rgba(14, 165, 233, 0.1)" />
-                  <XAxis tick={{ fill: '#94a3b8', fontSize: 10 }} />
-                  <YAxis domain={[250, 400]} tick={{ fill: '#94a3b8', fontSize: 12 }} />
-                  <Tooltip contentStyle={{ backgroundColor: '#0F172A', border: '1px solid rgba(14, 165, 233, 0.3)', borderRadius: '8px', color: '#fff' }} />
-                  <Bar dataKey="rate" fill="#06B6D4" radius={[4, 4, 0, 0]} name="速率 (nm/min)" />
-                </BarChart>
-              </ResponsiveContainer>
-            </div>
-          </div>
+              <div className="glass-panel rounded-xl p-6">
+                <h3 className="font-display font-semibold text-white mb-4">选择性监控</h3>
+                <div className="h-64">
+                  <ResponsiveContainer width="100%" height="100%">
+                    <AreaChart data={task.result?.time_series || realtimeMetrics.map((m, i) => ({ time: i, angle: m.profileAngle, selectivity: m.selectivity, rate: m.etchRate }))}>
+                      <defs>
+                        <linearGradient id="selectivityGrad" x1="0" y1="0" x2="0" y2="1">
+                          <stop offset="5%" stopColor="#10B981" stopOpacity={0.3} />
+                          <stop offset="95%" stopColor="#10B981" stopOpacity={0} />
+                        </linearGradient>
+                      </defs>
+                      <CartesianGrid strokeDasharray="3 3" stroke="rgba(14, 165, 233, 0.1)" />
+                      <XAxis dataKey="time" tick={{ fill: '#94a3b8', fontSize: 12 }} />
+                      <YAxis domain={[0, 20]} tick={{ fill: '#94a3b8', fontSize: 12 }} />
+                      <Tooltip contentStyle={{ backgroundColor: '#0F172A', border: '1px solid rgba(14, 165, 233, 0.3)', borderRadius: '8px', color: '#fff' }} />
+                      <Area type="monotone" dataKey="selectivity" stroke="#10B981" strokeWidth={2} fill="url(#selectivityGrad)" name="选择性" />
+                      <Line type="monotone" dataKey={() => 10} stroke="#F97316" strokeWidth={1} strokeDasharray="5,5" name="阈值" />
+                    </AreaChart>
+                  </ResponsiveContainer>
+                </div>
+              </div>
 
-          <div className="glass-panel rounded-xl p-6">
-            <h3 className="font-display font-semibold text-white mb-4">表面粗糙度曲线</h3>
-            <div className="h-64">
-              <ResponsiveContainer width="100%" height="100%">
-                <LineChart data={task.result.roughness_curve.map((v, i) => ({ pos: i, roughness: v }))}>
-                  <CartesianGrid strokeDasharray="3 3" stroke="rgba(14, 165, 233, 0.1)" />
-                  <XAxis tick={{ fill: '#94a3b8', fontSize: 10 }} />
-                  <YAxis domain={[-3, 3]} tick={{ fill: '#94a3b8', fontSize: 12 }} />
-                  <Tooltip contentStyle={{ backgroundColor: '#0F172A', border: '1px solid rgba(14, 165, 233, 0.3)', borderRadius: '8px', color: '#fff' }} />
-                  <Line type="monotone" dataKey="roughness" stroke="#8B5CF6" strokeWidth={1.5} dot={false} name="粗糙度 (nm)" />
-                </LineChart>
-              </ResponsiveContainer>
+              {task.result.rate_distribution && (
+                <div className="glass-panel rounded-xl p-6">
+                  <h3 className="font-display font-semibold text-white mb-4">刻蚀速率分布</h3>
+                  <div className="h-64">
+                    <ResponsiveContainer width="100%" height="100%">
+                      <BarChart data={task.result.rate_distribution.map((v, i) => ({ pos: i, rate: v }))}>
+                        <CartesianGrid strokeDasharray="3 3" stroke="rgba(14, 165, 233, 0.1)" />
+                        <XAxis tick={{ fill: '#94a3b8', fontSize: 10 }} />
+                        <YAxis domain={[250, 400]} tick={{ fill: '#94a3b8', fontSize: 12 }} />
+                        <Tooltip contentStyle={{ backgroundColor: '#0F172A', border: '1px solid rgba(14, 165, 233, 0.3)', borderRadius: '8px', color: '#fff' }} />
+                        <Bar dataKey="rate" fill="#06B6D4" radius={[4, 4, 0, 0]} name="速率 (nm/min)" />
+                      </BarChart>
+                    </ResponsiveContainer>
+                  </div>
+                </div>
+              )}
+
+              {task.result.roughness_curve && (
+                <div className="glass-panel rounded-xl p-6">
+                  <h3 className="font-display font-semibold text-white mb-4">表面粗糙度曲线</h3>
+                  <div className="h-64">
+                    <ResponsiveContainer width="100%" height="100%">
+                      <LineChart data={task.result.roughness_curve.map((v, i) => ({ pos: i, roughness: v }))}>
+                        <CartesianGrid strokeDasharray="3 3" stroke="rgba(14, 165, 233, 0.1)" />
+                        <XAxis tick={{ fill: '#94a3b8', fontSize: 10 }} />
+                        <YAxis domain={[-3, 3]} tick={{ fill: '#94a3b8', fontSize: 12 }} />
+                        <Tooltip contentStyle={{ backgroundColor: '#0F172A', border: '1px solid rgba(14, 165, 233, 0.3)', borderRadius: '8px', color: '#fff' }} />
+                        <Line type="monotone" dataKey="roughness" stroke="#8B5CF6" strokeWidth={1.5} dot={false} name="粗糙度 (nm)" />
+                      </LineChart>
+                    </ResponsiveContainer>
+                  </div>
+                  <div className="mt-4 flex justify-around text-xs text-gray-400">
+                    <span>Ra: {task.result.roughness_curve.reduce((a, b) => a + Math.abs(b), 0) / task.result.roughness_curve.length} nm</span>
+                    <span>Rms: {Math.sqrt(task.result.roughness_curve.reduce((a, b) => a + b * b, 0) / task.result.roughness_curve.length)} nm</span>
+                  </div>
+                </div>
+              )}
             </div>
-            <div className="mt-4 flex justify-around text-xs text-gray-400">
-              <span>Ra: {task.result.roughness_curve.reduce((a, b) => a + Math.abs(b), 0) / task.result.roughness_curve.length} nm</span>
-              <span>Rms: {Math.sqrt(task.result.roughness_curve.reduce((a, b) => a + b * b, 0) / task.result.roughness_curve.length)} nm</span>
+          ) : (
+            <div className="glass-panel rounded-xl p-12 text-center">
+              <Loader2 className="w-12 h-12 text-tech-400 animate-spin mx-auto mb-4" />
+              <p className="text-gray-400">等待模拟数据...</p>
             </div>
-          </div>
+          )}
         </div>
       )}
 

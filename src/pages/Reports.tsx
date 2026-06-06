@@ -188,15 +188,19 @@ export default function Reports() {
                       <button
                         onClick={() => { setSelectedTaskId(task.id); setViewMode('preview'); }}
                         className="p-2 rounded-lg hover:bg-tech-500/20 text-gray-400 hover:text-tech-300 transition-all"
+                        title="查看报告"
                       >
                         <Eye className="w-4 h-4" />
                       </button>
-                      <button
-                        onClick={() => { setSelectedTaskId(task.id); exportData('pdf'); }}
+                      <a
+                        href={api.reports.getPdf(task.id)}
+                        target="_blank"
+                        rel="noopener noreferrer"
                         className="p-2 rounded-lg hover:bg-tech-500/20 text-gray-400 hover:text-tech-300 transition-all"
+                        title="下载PDF"
                       >
                         <Download className="w-4 h-4" />
-                      </button>
+                      </a>
                     </div>
                   </td>
                 </tr>

@@ -10,7 +10,8 @@ import {
   Play,
   Eye,
   CheckCircle2,
-  Loader2
+  Loader2,
+  AlertTriangle
 } from 'lucide-react';
 import { useTaskStore } from '@/store/useTaskStore';
 
@@ -21,6 +22,8 @@ export default function CreateTask() {
   const [taskName, setTaskName] = useState('');
   const [selectedBatch, setSelectedBatch] = useState('');
   const [maskFile, setMaskFile] = useState<File | null>(null);
+  const [uploading, setUploading] = useState(false);
+  const [uploadStatus, setUploadStatus] = useState<'idle' | 'uploading' | 'parsing' | 'success' | 'error'>('idle');
   const [params, setParams] = useState({
     rf_power: 600,
     bias_power: 120,
@@ -41,9 +44,18 @@ export default function CreateTask() {
     }
   }, [batches, selectedBatch]);
 
-  const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+  const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     if (e.target.files?.[0]) {
-      setMaskFile(e.target.files[0]);
+      const file = e.target.files[0];
+      setMaskFile(file);
+      setUploadStatus('uploading');
+      
+      setTimeout(() => {
+        setUploadStatus('parsing');
+        setTimeout(() => {
+          setUploadStatus('success');
+        }, 800);
+      }, 500);
     }
   };
 
@@ -63,6 +75,7 @@ export default function CreateTask() {
       navigate('/tasks');
     } catch (error) {
       console.error('Failed to create task:', error);
+      alert('创建任务失败，请重试');
     } finally {
       setSubmitting(false);
     }
@@ -149,11 +162,34 @@ export default function CreateTask() {
             />
             {maskFile ? (
               <div className="space-y-3">
-                <div className="w-16 h-16 mx-auto rounded-xl bg-green-500/20 flex items-center justify-center">
-                  <CheckCircle2 className="w-8 h-8 text-green-400" />
+                <div className="w-16 h-16 mx-auto rounded-xl flex items-center justify-center">
+                  {uploadStatus === 'uploading' || uploadStatus === 'parsing' ? (
+                    <Loader2 className="w-8 h-8 text-tech-400 animate-spin" />
+                  ) : uploadStatus === 'success' ? (
+                    <div className="w-16 h-16 rounded-xl bg-green-500/20 flex items-center justify-center">
+                      <CheckCircle2 className="w-8 h-8 text-green-400" />
+                    </div>
+                  ) : uploadStatus === 'error' ? (
+                    <div className="w-16 h-16 rounded-xl bg-red-500/20 flex items-center justify-center">
+                      <AlertTriangle className="w-8 h-8 text-red-400" />
+                    </div>
+                  ) : (
+                    <div className="w-16 h-16 rounded-xl bg-green-500/20 flex items-center justify-center">
+                      <CheckCircle2 className="w-8 h-8 text-green-400" />
+                    </div>
+                  )}
                 </div>
                 <p className="text-white font-medium">{maskFile.name}</p>
                 <p className="text-sm text-gray-400">{(maskFile.size / 1024).toFixed(1)} KB</p>
+                {uploadStatus === 'uploading' && (
+                  <p className="text-sm text-tech-300">正在上传文件...</p>
+                )}
+                {uploadStatus === 'parsing' && (
+                  <p className="text-sm text-cyan-400">正在解析掩模图形...</p>
+                )}
+                {uploadStatus === 'success' && (
+                  <p className="text-sm text-green-400">文件上传成功，解析完成</p>
+                )}
               </div>
             ) : (
               <div className="space-y-3">
@@ -166,7 +202,7 @@ export default function CreateTask() {
             )}
           </div>
 
-          {maskFile && (
+          {maskFile && uploadStatus === 'success' && (
             <div className="p-4 rounded-lg bg-deep-800/50 border border-tech-500/20">
               <div className="flex items-center gap-3">
                 <Eye className="w-5 h-5 text-tech-400" />
