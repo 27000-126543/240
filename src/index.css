@@ -1,0 +1,77 @@
+@import url('https://fonts.googleapis.com/css2?family=Geologica:wght@400;500;600;700;800;900&family=Inter:wght@300;400;500;600;700&display=swap');
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  font-family: 'Inter', sans-serif;
+  line-height: 1.5;
+  font-weight: 400;
+  color-scheme: dark;
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+body {
+  margin: 0;
+  min-width: 320px;
+  min-height: 100vh;
+  background: #050a14;
+  color: #e2e8f0;
+}
+
+.font-display {
+  font-family: 'Geologica', sans-serif;
+}
+
+@layer utilities {
+  .text-balance {
+    text-wrap: balance;
+  }
+  
+  .scrollbar-thin::-webkit-scrollbar {
+    width: 6px;
+    height: 6px;
+  }
+  
+  .scrollbar-thin::-webkit-scrollbar-track {
+    background: rgba(30, 41, 59, 0.5);
+  }
+  
+  .scrollbar-thin::-webkit-scrollbar-thumb {
+    background: rgba(14, 165, 233, 0.3);
+    border-radius: 3px;
+  }
+  
+  .scrollbar-thin::-webkit-scrollbar-thumb:hover {
+    background: rgba(14, 165, 233, 0.5);
+  }
+  
+  .glass-panel {
+    background: rgba(15, 23, 42, 0.8);
+    backdrop-filter: blur(12px);
+    border: 1px solid rgba(14, 165, 233, 0.15);
+  }
+  
+  .grid-bg {
+    background-image: 
+      linear-gradient(rgba(14, 165, 233, 0.05) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(14, 165, 233, 0.05) 1px, transparent 1px);
+    background-size: 20px 20px;
+  }
+  
+  .glow-text {
+    text-shadow: 0 0 10px rgba(14, 165, 233, 0.5);
+  }
+  
+  .status-pending { @apply bg-gray-500/20 text-gray-400 border-gray-500/30; }
+  .status-model_building { @apply bg-tech-500/20 text-tech-300 border-tech-500/30; }
+  .status-plasma_calculation { @apply bg-cyan-500/20 text-cyan-400 border-cyan-500/30; }
+  .status-rate_analysis { @apply bg-plasma-purple/20 text-plasma-purple border-plasma-purple/30; }
+  .status-profile_evolution { @apply bg-plasma-green/20 text-plasma-green border-plasma-green/30; }
+  .status-completed { @apply bg-green-500/20 text-green-400 border-green-500/30; }
+  .status-error { @apply bg-red-500/20 text-red-400 border-red-500/30; }
+}
